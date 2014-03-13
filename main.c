@@ -37,7 +37,7 @@
 
 #define DMA_ADC_SIZE		1024
 
-#define SESSION_SIZE		1
+#define SESSION_SIZE		4
 #define SESSION_LENGTH		1000 // ms
 
 /*******************************************************************************
@@ -45,10 +45,11 @@
  ******************************************************************************/
 
 typedef struct {
-	uint32_t sum;
-	uint32_t count;
-	uint32_t countOV;
-} ADCSessionBufferItem;
+	uint32_t sum[SESSION_SIZE];
+	uint32_t count[SESSION_SIZE];
+	uint32_t countOV[SESSION_SIZE];
+	uint8_t  d1[4];
+} SessionBuffer;
 
 /*******************************************************************************
  * Global variables
@@ -61,11 +62,11 @@ __IO uint8_t dmaTxBuffer[16];
 BitAction captureADCState = Bit_RESET;
 __IO uint8_t dmaADCBuffer[DMA_ADC_SIZE * 2];
 
-struct {
+__IO struct {
 	uint16_t head;
-	uint16_t headEnd;
-	uint32_t txSize;
-	__IO ADCSessionBufferItem buffer[SESSION_SIZE * 2];
+	SessionBuffer *buffer;
+	__IO SessionBuffer buffer1;
+	__IO SessionBuffer buffer2;
 } session;
 
 uint8_t ADCNoise     = 0x00;
@@ -313,11 +314,11 @@ void RestartTxDMA(uint32_t memoryAddr, uint32_t bufferSize)
 	DMA_Cmd(DMA1_Channel4, ENABLE);
 }
 
-void wipeSessionData(ADCSessionBufferItem *data)
+void wipeSessionData(uint16_t index)
 {
-	data->sum = 0;
-	data->count = 0;
-	data->countOV = 0;
+	session.buffer->sum[index]     = 0;
+	session.buffer->count[index]   = 0;
+	session.buffer->countOV[index] = 0;
 }
 
 void rotateBufferBytes(uint32_t memAddr, uint32_t size)
@@ -337,7 +338,8 @@ void StartCaptureADC()
 		DMA_SetCurrDataCounter(DMA1_Channel6, DMA_ADC_SIZE * 2);
 		TIM_SetCounter(TIM2, 0);
 		session.head = 0;
-		wipeSessionData(&session.buffer[0]);
+		session.buffer = &session.buffer1;
+		wipeSessionData(0);
 
 		// Enable session timer
 		TIM_SetCounter(TIM2, 0);
@@ -399,10 +401,9 @@ void SumADCData(uint16_t bufferBasePos, uint16_t bytesCount)
 	}
 
 	__disable_irq();
-	ADCSessionBufferItem *data = &session.buffer[session.head];
-	data->sum += sum;
-	data->count += count;
-	data->countOV += countOV;
+	session.buffer->sum[session.head]     += sum;
+	session.buffer->count[session.head]   += count;
+	session.buffer->countOV[session.head] += countOV;
 	__enable_irq();
 
 	ADCSumBusy = Bit_RESET;
@@ -480,42 +481,27 @@ void TIM2_IRQHandler()
 {
 	if (TIM_GetITStatus(TIM2, TIM_IT_Update)) {
 		__disable_irq();
-//		TIM_Cmd(TIM2, DISABLE);
+		TIM_Cmd(TIM2, DISABLE);
 
 		ToggleLED2();
 
-//		ADCSessionBufferItem *data = &session.buffer[session.head];
-//		uint8_t i = 0;
-//		dmaTxBuffer[i++] = (uint8_t)(data->sum >> 24);
-//		dmaTxBuffer[i++] = (uint8_t)(data->sum >> 16);
-//		dmaTxBuffer[i++] = (uint8_t)(data->sum >> 8);
-//		dmaTxBuffer[i++] = (uint8_t) data->sum;
-//		dmaTxBuffer[i++] = (uint8_t)(data->count >> 24);
-//		dmaTxBuffer[i++] = (uint8_t)(data->count >> 16);
-//		dmaTxBuffer[i++] = (uint8_t)(data->count >> 8);
-//		dmaTxBuffer[i++] = (uint8_t) data->count;
-//		RestartTxDMA(&dmaTxBuffer[0], i);
-
 		++session.head;
-
 		if (session.head == SESSION_SIZE) {
 			// Send first part of array
-			rotateBufferBytes(&session.buffer[0], session.txSize);
-			RestartTxDMA(&session.buffer[0], session.txSize);
-		} else if (session.head == session.headEnd) {
-			// Send second part
-			rotateBufferBytes(&session.buffer[SESSION_SIZE], session.txSize);
-			RestartTxDMA(&session.buffer[SESSION_SIZE], session.txSize);
-			// Start from begin
+			rotateBufferBytes(session.buffer, sizeof(SessionBuffer));
+			RestartTxDMA(session.buffer, sizeof(SessionBuffer));
+
+			// Swap buffer
+			session.buffer = (session.buffer == &session.buffer2) ? &session.buffer1 : &session.buffer2;
 			session.head = 0;
 		}
 
-		wipeSessionData(&session.buffer[session.head]);
+		wipeSessionData(session.head);
 
 		TIM_ClearITPendingBit(TIM2, TIM_IT_Update);
 
-//		TIM_SetCounter(TIM2, 0);
-//		TIM_Cmd(TIM2, ENABLE);
+		TIM_SetCounter(TIM2, 0);
+		TIM_Cmd(TIM2, ENABLE);
 		__enable_irq();
 	}
 }
@@ -546,8 +532,15 @@ void main(void)
 
 	TIM_ClearITPendingBit(TIM2, TIM_IT_Update);
 
-	session.headEnd = SESSION_SIZE * 2;
-	session.txSize  = SESSION_SIZE * sizeof(ADCSessionBufferItem);
+	session.buffer1.d1[0] = '-';
+	session.buffer1.d1[1] = '-';
+	session.buffer1.d1[2] = '-';
+	session.buffer1.d1[3] = '-';
+
+	session.buffer2.d1[0] = '+';
+	session.buffer2.d1[1] = '+';
+	session.buffer2.d1[2] = '+';
+	session.buffer2.d1[3] = '+';
 
 	ToggleLED1(); // Device is ready
 	__enable_irq();
