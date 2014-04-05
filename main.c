@@ -10,9 +10,6 @@
 #include "stm32f10x.h"
 #include "stm32f10x_conf.h"
 
-// From fftlib
-void FFT128Real_32b(int *y, int *x);
-
 /*
  * Connection map:
  * 		PC0 - PC7	GPIO input
@@ -43,7 +40,7 @@ void FFT128Real_32b(int *y, int *x);
 #define DEBUG_PORT			GPIOB
 #define DEBUG_PIN_DMA		GPIO_Pin_10
 #define DEBUG_PIN_TIMER		GPIO_Pin_11
-#define DEBUG_PIN_FFT		GPIO_Pin_12
+//#define DEBUG_PIN_FFT		GPIO_Pin_12
 #define DEBUG_PIN_SEND		GPIO_Pin_13
 //#define DEBUG_PIN_			GPIO_Pin_14
 //#define DEBUG_PIN_			GPIO_Pin_15
@@ -60,8 +57,6 @@ typedef struct {
 	uint32_t d3[4];
 	uint32_t countOV[SESSION_SIZE];
 	uint32_t d4[4];
-	uint32_t fft[SESSION_SIZE + 1];
-	uint32_t d5[3];
 } SessionBuffer;
 
 /*******************************************************************************
@@ -78,12 +73,10 @@ __IO uint8_t dmaADCBuffer[DMA_ADC_SIZE * 2];
 struct {
 	uint16_t head;
 	__IO SessionBuffer *buffer;
-	__IO SessionBuffer *fftBuffer;
 	__IO SessionBuffer buffer1;
 	__IO SessionBuffer buffer2;
 } session;
 
-uint8_t ADCNoise     = 0x00;
 uint8_t ADCReference = 0x80;
 
 /*******************************************************************************
@@ -426,32 +419,6 @@ void SumADCData(uint16_t bufferBasePos, uint16_t bytesCount)
 	ADCSumBusy = Bit_RESET;
 }
 
-void FFT()
-{
-	GPIO_WriteBit(DEBUG_PORT, DEBUG_PIN_FFT, Bit_SET);
-
-	static BitAction state = Bit_RESET;
-	if (state == Bit_SET) {
-		HALT('F');
-	}
-	state = Bit_SET;
-
-	// Clear output array
-	for (uint8_t i = 0; i < SESSION_SIZE + 1; ++i) {
-		session.fftBuffer->fft[i] = 0;
-		//dfft[i] = 0;
-	}
-
-	FFT128Real_32b(session.fftBuffer->fft, session.fftBuffer->sum);
-	RestartTxDMA(session.fftBuffer, sizeof(SessionBuffer));
-	//FFT128Real_32b(dfft, dsum);
-	//RestartTxDMA(dfft, sizeof(dfft));
-
-	state = Bit_RESET;
-
-	GPIO_WriteBit(DEBUG_PORT, DEBUG_PIN_FFT, Bit_RESET);
-}
-
 /*******************************************************************************
  * Interrupt handlers
  ******************************************************************************/
@@ -543,13 +510,8 @@ void TIM2_IRQHandler()
 		++session.head;
 		if (session.head == SESSION_SIZE) {
 			// Send first part of array
-//			rotateBufferBytes(session.buffer, sizeof(SessionBuffer));
-//			RestartTxDMA(session.buffer, sizeof(SessionBuffer));
-
-			// Ready buffer to processing in FFT
-			session.fftBuffer = session.buffer;
-//			RestartTxDMA(session.fftBuffer, sizeof(SessionBuffer));
-			FFT();
+			rotateBufferBytes(session.buffer, sizeof(SessionBuffer));
+			RestartTxDMA(session.buffer, sizeof(SessionBuffer));
 
 			// Swap buffer
 			session.buffer = (session.buffer == &session.buffer2) ? &session.buffer1 : &session.buffer2;
@@ -597,17 +559,12 @@ int main()
 		session.buffer1.d1[i] = 0x2D2D2D2D; // '-'
 		session.buffer1.d2[i] = 0x2F2F2F2F; // '/'
 		session.buffer1.d3[i] = 0x2F2F2F2F; // '/'
-		session.buffer1.d4[i] = 0x2F2F2F2F; // '/'
+		session.buffer1.d4[i] = 0x2D2D2D2D; // '/'
 
 		session.buffer2.d1[i] = 0x2B2B2B2B; // '+'
 		session.buffer2.d2[i] = 0x2F2F2F2F; // '/'
 		session.buffer2.d3[i] = 0x2F2F2F2F; // '/'
-		session.buffer2.d4[i] = 0x2F2F2F2F; // '/'
-
-		if (i < 3) {
-			session.buffer1.d5[i] = 0x2D2D2D2D; // '-'
-			session.buffer2.d5[i] = 0x2B2B2B2B; // '+'
-		}
+		session.buffer2.d4[i] = 0x2B2B2B2B; // '/'
 	}
 
 	GPIO_WriteBit(LED_PORT, LED_1, Bit_SET); // Device is ready
@@ -616,12 +573,7 @@ int main()
 	// TODO: DEBUG!
 	ToggleCaptureADC();
 
-	while (1) {
-//		if (canFFT == Bit_SET) {
-//			USART_SendData(USART_PHY, 'm');
-//			FFT();
-//		}
-	}
+	while (1) {}
 
 	return 0;
 }
