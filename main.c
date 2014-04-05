@@ -8,14 +8,10 @@
   */
 
 #include "stm32f10x.h"
-#include "stm32f10x_gpio.h"
-#include "stm32f10x_rcc.h"
-#include "stm32f10x_tim.h"
-#include "stm32f10x_usart.h"
-#include "stm32f10x_exti.h"
-#include "stm32f10x_dma.h"
-#include "stm32f10x_crc.h"
-#include "misc.h"
+#include "stm32f10x_conf.h"
+
+// From fftlib
+void FFT128Real_32b(int *y, int *x);
 
 /*
  * Connection map:
@@ -37,18 +33,35 @@
 
 #define DMA_ADC_SIZE		1024
 
-#define SESSION_SIZE		4
+#define SESSION_SIZE		128
 #define SESSION_LENGTH		1000 // ms
+
+#define LED_PORT			GPIOC
+#define LED_1				GPIO_Pin_8
+#define LED_2				GPIO_Pin_9
+
+#define DEBUG_PORT			GPIOB
+#define DEBUG_PIN_DMA		GPIO_Pin_10
+#define DEBUG_PIN_TIMER		GPIO_Pin_11
+#define DEBUG_PIN_FFT		GPIO_Pin_12
+#define DEBUG_PIN_SEND		GPIO_Pin_13
+//#define DEBUG_PIN_			GPIO_Pin_14
+//#define DEBUG_PIN_			GPIO_Pin_15
 
 /*******************************************************************************
  * Structures
  ******************************************************************************/
 
 typedef struct {
+	uint32_t d1[4];
 	uint32_t sum[SESSION_SIZE];
+	uint32_t d2[4];
 	uint32_t count[SESSION_SIZE];
+	uint32_t d3[4];
 	uint32_t countOV[SESSION_SIZE];
-	uint8_t  d1[4];
+	uint32_t d4[4];
+	uint32_t fft[SESSION_SIZE + 1];
+	uint32_t d5[3];
 } SessionBuffer;
 
 /*******************************************************************************
@@ -62,9 +75,10 @@ __IO uint8_t dmaTxBuffer[16];
 BitAction captureADCState = Bit_RESET;
 __IO uint8_t dmaADCBuffer[DMA_ADC_SIZE * 2];
 
-__IO struct {
+struct {
 	uint16_t head;
-	SessionBuffer *buffer;
+	__IO SessionBuffer *buffer;
+	__IO SessionBuffer *fftBuffer;
 	__IO SessionBuffer buffer1;
 	__IO SessionBuffer buffer2;
 } session;
@@ -76,6 +90,7 @@ uint8_t ADCReference = 0x80;
  * Declare function prototypes
  ******************************************************************************/
 
+void StopCaptureADC();
 void Delay(__IO uint32_t nCount);
 
 /*******************************************************************************
@@ -134,7 +149,7 @@ void DMA_Configure()
 //	DMA_Init(DMA1_Channel4, &dmaTx);
 
 //	DMA_ITConfig(DMA1_Channel4, DMA_IT_TC, ENABLE);
-//	NVIC_EnableIRQ(DMA1_Channel4_IRQn);
+	NVIC_EnableIRQ(DMA1_Channel4_IRQn);
 }
 
 void GPIO_Configure()
@@ -216,7 +231,7 @@ void USART_Configure()
 
 	USART_ITConfig(USART_PHY, USART_IT_RXNE, ENABLE);
 //	USART_ITConfig(USART_PHY, USART_IT_TXE, ENABLE);
-	USART_ITConfig(USART_PHY, USART_IT_TC, ENABLE);
+//	USART_ITConfig(USART_PHY, USART_IT_TC, ENABLE);
 
 	NVIC_EnableIRQ(USART1_IRQn);
 
@@ -275,34 +290,34 @@ void Timers_Configure()
 void ToggleLED1()
 {
 	static BitAction state = Bit_RESET;
-	state = ~state;
-	GPIO_WriteBit(GPIOC, GPIO_Pin_8, state);
+	state = (state == Bit_RESET) ? Bit_SET : Bit_RESET;
+	GPIO_WriteBit(LED_PORT, LED_1, state);
 }
 
 void ToggleLED2()
 {
 	static BitAction state = Bit_RESET;
-	state = ~state;
-	GPIO_WriteBit(GPIOC, GPIO_Pin_9, state);
+	state = (state == Bit_RESET) ? Bit_SET : Bit_RESET;
+	GPIO_WriteBit(LED_PORT, LED_2, state);
 }
 
 void HALT(uint8_t debugChar)
 {
 	__disable_irq();
 	StopCaptureADC();
-	GPIO_WriteBit(GPIOC, GPIO_Pin_8, Bit_RESET);
+	GPIO_WriteBit(LED_PORT, LED_1, Bit_RESET);
 	USART_SendData(USART_PHY, debugChar);
 	while (1) { }
 }
 
 void RestartTxDMA(uint32_t memoryAddr, uint32_t bufferSize)
 {
-	if (! (DMA_GetFlagStatus(DMA1_FLAG_TC4) || dmaTxBusy == Bit_RESET)) {
-//	if (dmaTxBusy == Bit_SET) {
+	if (dmaTxBusy == Bit_SET) {
 		HALT('T');
 	}
 
 	dmaTxBusy = Bit_SET;
+	GPIO_WriteBit(DEBUG_PORT, DEBUG_PIN_SEND, Bit_SET);
 
 	DMA_Cmd(DMA1_Channel4, DISABLE);
 	DMA_DeInit(DMA1_Channel4);
@@ -310,6 +325,8 @@ void RestartTxDMA(uint32_t memoryAddr, uint32_t bufferSize)
 	dmaTx.DMA_MemoryBaseAddr = memoryAddr;
 	dmaTx.DMA_BufferSize     = bufferSize;
 	DMA_Init(DMA1_Channel4, &dmaTx);
+
+	DMA_ITConfig(DMA1_Channel4, DMA_IT_TC, ENABLE);
 
 	DMA_Cmd(DMA1_Channel4, ENABLE);
 }
@@ -323,7 +340,7 @@ void wipeSessionData(uint16_t index)
 
 void rotateBufferBytes(uint32_t memAddr, uint32_t size)
 {
-
+	// TODO:
 }
 
 void StartCaptureADC()
@@ -409,6 +426,32 @@ void SumADCData(uint16_t bufferBasePos, uint16_t bytesCount)
 	ADCSumBusy = Bit_RESET;
 }
 
+void FFT()
+{
+	GPIO_WriteBit(DEBUG_PORT, DEBUG_PIN_FFT, Bit_SET);
+
+	static BitAction state = Bit_RESET;
+	if (state == Bit_SET) {
+		HALT('F');
+	}
+	state = Bit_SET;
+
+	// Clear output array
+	for (uint8_t i = 0; i < SESSION_SIZE + 1; ++i) {
+		session.fftBuffer->fft[i] = 0;
+		//dfft[i] = 0;
+	}
+
+	FFT128Real_32b(session.fftBuffer->fft, session.fftBuffer->sum);
+	RestartTxDMA(session.fftBuffer, sizeof(SessionBuffer));
+	//FFT128Real_32b(dfft, dsum);
+	//RestartTxDMA(dfft, sizeof(dfft));
+
+	state = Bit_RESET;
+
+	GPIO_WriteBit(DEBUG_PORT, DEBUG_PIN_FFT, Bit_RESET);
+}
+
 /*******************************************************************************
  * Interrupt handlers
  ******************************************************************************/
@@ -417,15 +460,16 @@ void EXTI0_IRQHandler()
 {
 	if (EXTI_GetITStatus(EXTI_Line0)) {
 		EXTI_ClearITPendingBit(EXTI_Line0);
-		ToggleCaptureADC();
+//		ToggleCaptureADC();
+		StopCaptureADC();
 	}
 }
 
 void USART1_IRQHandler()
 {
-	if (USART_GetITStatus(USART_PHY, USART_IT_TC)) {
-		USART_ClearITPendingBit(USART_PHY, USART_IT_TC);
-	}
+//	if (USART_GetITStatus(USART_PHY, USART_IT_TC)) {
+//		USART_ClearITPendingBit(USART_PHY, USART_IT_TC);
+//	}
 
 	if (USART_GetITStatus(USART_PHY, USART_IT_RXNE)) {
 		uint8_t data = USART_ReceiveData(USART_PHY);
@@ -434,9 +478,18 @@ void USART1_IRQHandler()
 			case 'S':
 				ToggleCaptureADC();
 				break;
-			case 'D':
+			case 'G':
 				data = (uint8_t)GPIO_ReadInputData(GPIOC);
 				USART_SendData(USART_PHY, data);
+				break;
+			case '1':
+				RestartTxDMA(&session.buffer1, sizeof(SessionBuffer));
+				break;
+			case '2':
+				RestartTxDMA(&session.buffer2, sizeof(SessionBuffer));
+				break;
+			case 't':
+				RestartTxDMA(&(session.buffer1.d1), sizeof(session.buffer1.d1));
 				break;
 			default:
 				USART_SendData(USART_PHY, data);
@@ -447,20 +500,19 @@ void USART1_IRQHandler()
 	}
 }
 
-/*
 void DMA1_Channel4_IRQHandler(void)
 {
 	if (DMA_GetITStatus(DMA1_IT_TC4)) {
+		GPIO_WriteBit(DEBUG_PORT, DEBUG_PIN_SEND, Bit_RESET);
 		dmaTxBusy = Bit_RESET;
-		USART_SendData(USART_PHY, 'I');
 		DMA_ClearITPendingBit(DMA1_IT_TC4);
 	}
 }
-*/
 
 void DMA1_Channel6_IRQHandler()
 {
 //	NVIC_DisableIRQ(DMA1_Channel6_IRQn);
+	GPIO_WriteBit(DEBUG_PORT, DEBUG_PIN_DMA, Bit_SET);
 
 	if (DMA_GetITStatus(DMA1_IT_HT6)) {
 		DMA_ClearITPendingBit(DMA1_IT_HT6);
@@ -474,13 +526,16 @@ void DMA1_Channel6_IRQHandler()
 		SumADCData(DMA_ADC_SIZE, DMA_ADC_SIZE);
 	}
 
+	GPIO_WriteBit(DEBUG_PORT, DEBUG_PIN_DMA, Bit_RESET);
 //	NVIC_EnableIRQ(DMA1_Channel6_IRQn);
+
 }
 
 void TIM2_IRQHandler()
 {
 	if (TIM_GetITStatus(TIM2, TIM_IT_Update)) {
 		__disable_irq();
+		GPIO_WriteBit(DEBUG_PORT, DEBUG_PIN_TIMER, Bit_SET);
 		TIM_Cmd(TIM2, DISABLE);
 
 		ToggleLED2();
@@ -488,8 +543,13 @@ void TIM2_IRQHandler()
 		++session.head;
 		if (session.head == SESSION_SIZE) {
 			// Send first part of array
-			rotateBufferBytes(session.buffer, sizeof(SessionBuffer));
-			RestartTxDMA(session.buffer, sizeof(SessionBuffer));
+//			rotateBufferBytes(session.buffer, sizeof(SessionBuffer));
+//			RestartTxDMA(session.buffer, sizeof(SessionBuffer));
+
+			// Ready buffer to processing in FFT
+			session.fftBuffer = session.buffer;
+//			RestartTxDMA(session.fftBuffer, sizeof(SessionBuffer));
+			FFT();
 
 			// Swap buffer
 			session.buffer = (session.buffer == &session.buffer2) ? &session.buffer1 : &session.buffer2;
@@ -502,6 +562,7 @@ void TIM2_IRQHandler()
 
 		TIM_SetCounter(TIM2, 0);
 		TIM_Cmd(TIM2, ENABLE);
+		GPIO_WriteBit(DEBUG_PORT, DEBUG_PIN_TIMER, Bit_RESET);
 		__enable_irq();
 	}
 }
@@ -519,7 +580,7 @@ void Delay(__IO uint32_t nCount)
  * @brief  This example describes how to use GPIO to control a LED.
  *         LED PB8 is blinking in an infinite loop.
  ******************************************************************************/
-void main(void)
+int main()
 {
 	__disable_irq();
 
@@ -532,24 +593,35 @@ void main(void)
 
 	TIM_ClearITPendingBit(TIM2, TIM_IT_Update);
 
-	session.buffer1.d1[0] = '-';
-	session.buffer1.d1[1] = '-';
-	session.buffer1.d1[2] = '-';
-	session.buffer1.d1[3] = '-';
+	for (uint8_t i = 0; i < 4; ++i) {
+		session.buffer1.d1[i] = 0x2D2D2D2D; // '-'
+		session.buffer1.d2[i] = 0x2F2F2F2F; // '/'
+		session.buffer1.d3[i] = 0x2F2F2F2F; // '/'
+		session.buffer1.d4[i] = 0x2F2F2F2F; // '/'
 
-	session.buffer2.d1[0] = '+';
-	session.buffer2.d1[1] = '+';
-	session.buffer2.d1[2] = '+';
-	session.buffer2.d1[3] = '+';
+		session.buffer2.d1[i] = 0x2B2B2B2B; // '+'
+		session.buffer2.d2[i] = 0x2F2F2F2F; // '/'
+		session.buffer2.d3[i] = 0x2F2F2F2F; // '/'
+		session.buffer2.d4[i] = 0x2F2F2F2F; // '/'
 
-	ToggleLED1(); // Device is ready
+		if (i < 3) {
+			session.buffer1.d5[i] = 0x2D2D2D2D; // '-'
+			session.buffer2.d5[i] = 0x2B2B2B2B; // '+'
+		}
+	}
+
+	GPIO_WriteBit(LED_PORT, LED_1, Bit_SET); // Device is ready
 	__enable_irq();
 
+	// TODO: DEBUG!
 	ToggleCaptureADC();
 
 	while (1) {
-		// Trigger TIM3 IC event => DMA request by toggling PA6
-//		GPIO_ResetBits(GPIOA, GPIO_Pin_6);
-//		GPIO_SetBits(GPIOA, GPIO_Pin_6);
+//		if (canFFT == Bit_SET) {
+//			USART_SendData(USART_PHY, 'm');
+//			FFT();
+//		}
 	}
+
+	return 0;
 }
