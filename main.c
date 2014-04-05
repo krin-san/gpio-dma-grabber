@@ -1,9 +1,9 @@
 /**
   *****************************************************************************
-  * @title   ...
+  * @title   GPIO DMA Grabber
   * @author  Krin-San
   * @date    10 Feb 2014
-  * @brief   ...
+  * @brief   .
   *******************************************************************************
   */
 
@@ -84,7 +84,6 @@ uint8_t ADCReference = 0x80;
  ******************************************************************************/
 
 void StopCaptureADC();
-void Delay(__IO uint32_t nCount);
 
 /*******************************************************************************
  * Configurating
@@ -95,9 +94,7 @@ void RCC_Configure()
 	RCC_AHBPeriphClockCmd(RCC_AHBPeriph_DMA1, ENABLE);
 
 	RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOA | RCC_APB2Periph_GPIOC, ENABLE);
-
-	RCC_APB1PeriphClockCmd(RCC_APB1Periph_TIM3 | RCC_APB1Periph_TIM2, ENABLE);
-
+	RCC_APB1PeriphClockCmd(RCC_APB1Periph_TIM3  | RCC_APB1Periph_TIM2, ENABLE);
 	RCC_APB2PeriphClockCmd(RCC_APB2Periph_USART1, ENABLE);
 
 	// Pick one of the clocks to spew from MCO
@@ -223,18 +220,8 @@ void USART_Configure()
 	USART_DMACmd(USART1, USART_DMAReq_Tx, ENABLE);
 
 	USART_ITConfig(USART_PHY, USART_IT_RXNE, ENABLE);
-//	USART_ITConfig(USART_PHY, USART_IT_TXE, ENABLE);
-//	USART_ITConfig(USART_PHY, USART_IT_TC, ENABLE);
 
 	NVIC_EnableIRQ(USART1_IRQn);
-
-//	NVIC_InitTypeDef  NVIC_InitStructure;
-//
-//	NVIC_InitStructure.NVIC_IRQChannel = USART1_IRQn;
-//	NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = 0;
-//	NVIC_InitStructure.NVIC_IRQChannelSubPriority = 0;
-//	NVIC_InitStructure.NVIC_IRQChannelCmd = ENABLE;
-//	NVIC_Init(&NVIC_InitStructure);
 
 	USART_Cmd(USART_PHY, ENABLE);
 }
@@ -250,7 +237,6 @@ void Timers_Configure()
 	TIM_TimeBaseStructInit(&TIM_TimeBaseStructure);
 	TIM_TimeBaseStructure.TIM_Period        = 256;
 	TIM_TimeBaseStructure.TIM_Prescaler     = 0;
-//	TIM_TimeBaseStructure.TIM_ClockDivision = TIM_CKD_DIV1;
 	TIM_TimeBaseInit(TIM3, &TIM_TimeBaseStructure);
 
 	// Input Capture Mode configuration: Channel1
@@ -426,18 +412,13 @@ void SumADCData(uint16_t bufferBasePos, uint16_t bytesCount)
 void EXTI0_IRQHandler()
 {
 	if (EXTI_GetITStatus(EXTI_Line0)) {
-		EXTI_ClearITPendingBit(EXTI_Line0);
-//		ToggleCaptureADC();
 		StopCaptureADC();
+		EXTI_ClearITPendingBit(EXTI_Line0);
 	}
 }
 
 void USART1_IRQHandler()
 {
-//	if (USART_GetITStatus(USART_PHY, USART_IT_TC)) {
-//		USART_ClearITPendingBit(USART_PHY, USART_IT_TC);
-//	}
-
 	if (USART_GetITStatus(USART_PHY, USART_IT_RXNE)) {
 		uint8_t data = USART_ReceiveData(USART_PHY);
 
@@ -530,17 +511,7 @@ void TIM2_IRQHandler()
 }
 
 /*******************************************************************************
- * @brief  Inserts a delay time.
- * @param  nCount: specifies the delay time length.
- ******************************************************************************/
-void Delay(__IO uint32_t nCount)
-{
-	for (; nCount != 0; nCount--);
-}
-
-/*******************************************************************************
- * @brief  This example describes how to use GPIO to control a LED.
- *         LED PB8 is blinking in an infinite loop.
+ * @brief  Configuration and run loop
  ******************************************************************************/
 int main()
 {
