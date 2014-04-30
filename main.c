@@ -84,6 +84,9 @@ __IO uint8_t dmaTxBuffer[16];
  ******************************************************************************/
 
 void StopMonitoring();
+void CMP_HandleState(BitAction);
+void CMP_Handler();
+void Report();
 
 /*******************************************************************************
  * Конфигурация периферии
@@ -433,6 +436,9 @@ void StopMonitoring()
 		// Stop report timer
 		TIM_Cmd(REPORT_TIMER, DISABLE);
 
+		// Turn GPIO grabber off
+		CMP_HandleState(Bit_RESET);
+
 		monitoringState = Bit_RESET;
 	}
 	__enable_irq();
@@ -501,13 +507,14 @@ void EXTI0_IRQHandler()
 
 /*******************************************************************************
  * @brief  Логика обработки прерывания от компаратора
+ *         Обрабатывает состояние, переданное первым параметром
+ * @param  state Состояние, которое необходимо обработать
  * @see    EXTI1_IRQHandler()
+ * @see    CMP_Handler()
  ******************************************************************************/
-void CMP_Handler()
+void CMP_HandleState(BitAction state)
 {
 	GPIO_WriteBit(DEBUG_PORT, DEBUG_PIN_CMP, Bit_SET);
-
-	BitAction state = GPIO_ReadInputDataBit(CMP_PORT, CMP_PIN);
 	GPIO_WriteBit(LED_PORT, LED_1, state);
 
 	if (state == Bit_SET) {
@@ -548,8 +555,21 @@ void CMP_Handler()
 }
 
 /*******************************************************************************
+ * @brief  Логика обработки прерывания от компаратора.
+ *         Обрабатывает текущее состояние компаратора
+ * @see    EXTI1_IRQHandler()
+ * @see    CMP_HandleState()
+ ******************************************************************************/
+void CMP_Handler()
+{
+	BitAction state = GPIO_ReadInputDataBit(CMP_PORT, CMP_PIN);
+	CMP_HandleState(state);
+}
+
+/*******************************************************************************
  * @brief  Обработчик внешнего прерывания от компаратора
  * @see    CMP_Handler()
+ * @see    CMP_HandleState()
  ******************************************************************************/
 void EXTI1_IRQHandler()
 {
