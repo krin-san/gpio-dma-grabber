@@ -1,9 +1,9 @@
 /**
   *****************************************************************************
-  * @title   GPIO DMA Grabber
-  * @author  Krin-San
-  * @date    10 Feb 2014
-  * @brief   .
+  * @title  GPIO DMA Grabber
+  * @author Krin-San
+  * @date   10 Feb 2014
+  * @brief  Программа обработки данных измерительного канала АЭ
   *******************************************************************************
   */
 
@@ -11,84 +11,105 @@
 #include "stm32f10x_conf.h"
 
 /*
- * Connection map:
- * 		PC0 - PC7	GPIO input
- *		PA6			TIM3 Input (freq input)
- *		PA8			MCO Output
- *		PA9			USART1 Tx
- *		PA10		USART1 Rx
+ * Карта подключения:
+ *   PC0 - PC7  GPIO input
+ *   PA1        CMP input
+ *   PA6        TIM3 input (ADC CLK)
+ *   PA8        MCO output
+ *   PA9        USART1 Tx
+ *   PA10       USART1 Rx
+ *   PB*        Debug pins
  */
 
 /*******************************************************************************
- * Definitions
+ * Определения
  ******************************************************************************/
 
-#define ADC_PORT			GPIOC
+#define CMP_PORT            GPIOA
+#define CMP_PIN             GPIO_Pin_1
 
-#define USART_PHY			USART1
-#define USART_BAUD_RATE		115200
+#define CMP_TIMER           TIM4
+#define CMP_TIMER_TIMEOUT   100 // мс
 
-#define DMA_ADC_SIZE		1024
+#define ADC_CLK_TIMER       TIM3
+#define ADC_PORT            GPIOC
+#define ADC_DMA_SIZE        1024
 
-#define SESSION_SIZE		128
-#define SESSION_LENGTH		1000 // ms
+#define REPORT_TIMER        TIM2
+#define REPORT_TIMEOUT      1000 // мс
 
-#define LED_PORT			GPIOC
-#define LED_1				GPIO_Pin_8
-#define LED_2				GPIO_Pin_9
+#define USART_PHY           USART1
+#define USART_BAUD_RATE     115200
+
+// DEBUG
+
+#define LED_PORT            GPIOC
+#define LED_1               GPIO_Pin_8
+#define LED_2               GPIO_Pin_9
+
+#define DEBUG_PORT          GPIOB
+#define DEBUG_PIN_CMP       GPIO_Pin_10
+#define DEBUG_PIN_CMP_TMR   GPIO_Pin_11
+#define DEBUG_PIN_ADC_DMA   GPIO_Pin_12
+#define DEBUG_PIN_REPORT    GPIO_Pin_13
+#define DEBUG_PIN_SEND      GPIO_Pin_14
+//#define DEBUG_PIN_        GPIO_Pin_15
+#define DEBUG_PORT_PINS     (DEBUG_PIN_CMP | DEBUG_PIN_CMP_TMR | DEBUG_PIN_ADC_DMA | DEBUG_PIN_REPORT | DEBUG_PIN_SEND)
 
 /*******************************************************************************
- * Structures
+ * Структуры данных
  ******************************************************************************/
 
-typedef struct {
-	uint32_t sum[SESSION_SIZE];
-	uint32_t count[SESSION_SIZE];
-	uint32_t countOV[SESSION_SIZE];
-} SessionBuffer;
+
 
 /*******************************************************************************
- * Global variables
+ * Глобальные переменные
  ******************************************************************************/
+
+uint32_t cmpCounter;
+
+uint8_t  adcRef;
+uint32_t adcSum;
+uint32_t adcSumCount;
+
+BitAction monitoringState = Bit_RESET;
+__IO uint8_t adcBuffer[ADC_DMA_SIZE * 2];
 
 DMA_InitTypeDef dmaTx;
 BitAction dmaTxBusy = Bit_RESET;
 __IO uint8_t dmaTxBuffer[16];
 
-BitAction captureADCState = Bit_RESET;
-__IO uint8_t dmaADCBuffer[DMA_ADC_SIZE * 2];
-
-struct {
-	uint16_t head;
-	__IO SessionBuffer *buffer;
-	__IO SessionBuffer buffer1;
-	__IO SessionBuffer buffer2;
-} session;
-
-uint8_t ADCReference = 0x80;
-
 /*******************************************************************************
- * Declare function prototypes
+ * Прототипы функций
  ******************************************************************************/
 
-void StopCaptureADC();
+void StopMonitoring();
+void CMP_HandleState(BitAction);
+void CMP_Handler();
+void Report();
 
 /*******************************************************************************
- * Configurating
+ * Конфигурация периферии
  ******************************************************************************/
 
+/*******************************************************************************
+ * @brief  Включение тактирования периферии
+ ******************************************************************************/
 void RCC_Configure()
 {
 	RCC_AHBPeriphClockCmd(RCC_AHBPeriph_DMA1, ENABLE);
 
-	RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOA | RCC_APB2Periph_GPIOC, ENABLE);
-	RCC_APB1PeriphClockCmd(RCC_APB1Periph_TIM3  | RCC_APB1Periph_TIM2, ENABLE);
+	RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOA | RCC_APB2Periph_GPIOB | RCC_APB2Periph_GPIOC, ENABLE);
+	RCC_APB1PeriphClockCmd(RCC_APB1Periph_TIM3  | RCC_APB1Periph_TIM2  | RCC_APB1Periph_TIM4,  ENABLE);
 	RCC_APB2PeriphClockCmd(RCC_APB2Periph_USART1, ENABLE);
 
 	// Pick one of the clocks to spew from MCO
 	RCC_MCOConfig(RCC_MCO_HSE);
 }
 
+/*******************************************************************************
+ * @brief  Конфигурация контроллера прямого доступа к памяти (DMA)
+ ******************************************************************************/
 void DMA_Configure()
 {
 	DMA_InitTypeDef DMA_InitStructure;
@@ -96,9 +117,9 @@ void DMA_Configure()
 	// Configure DMA Channel for collecting data from ADC
 
 	DMA_InitStructure.DMA_PeripheralBaseAddr = (uint32_t)&ADC_PORT->IDR;
-	DMA_InitStructure.DMA_MemoryBaseAddr     = (uint32_t)&dmaADCBuffer[0];
+	DMA_InitStructure.DMA_MemoryBaseAddr     = (uint32_t)&adcBuffer[0];
 	DMA_InitStructure.DMA_DIR                = DMA_DIR_PeripheralSRC;
-	DMA_InitStructure.DMA_BufferSize         = DMA_ADC_SIZE * 2;
+	DMA_InitStructure.DMA_BufferSize         = ADC_DMA_SIZE * 2;
 	DMA_InitStructure.DMA_PeripheralInc      = DMA_PeripheralInc_Disable;
 	DMA_InitStructure.DMA_MemoryInc          = DMA_MemoryInc_Enable;
 	DMA_InitStructure.DMA_PeripheralDataSize = DMA_PeripheralDataSize_Byte;
@@ -116,26 +137,26 @@ void DMA_Configure()
 
 	DMA_StructInit(&dmaTx);
 	dmaTx.DMA_PeripheralBaseAddr = (uint32_t)&USART1->DR;
+	// dmaTx.DMA_MemoryBaseAddr     = (uint32_t)&dmaTxBuffer[0];
 	dmaTx.DMA_DIR                = DMA_DIR_PeripheralDST;
+	// dmaTx.DMA_BufferSize         = DMA_TX_SIZE;
 	dmaTx.DMA_PeripheralInc      = DMA_PeripheralInc_Disable;
 	dmaTx.DMA_MemoryInc          = DMA_MemoryInc_Enable;
 	dmaTx.DMA_PeripheralDataSize = DMA_PeripheralDataSize_Byte;
 	dmaTx.DMA_MemoryDataSize     = DMA_MemoryDataSize_Byte;
 	dmaTx.DMA_Priority           = DMA_Priority_Low;
+	// DMA_Init(DMA1_Channel4, &dmaTx);
 
-	DMA_ITConfig(DMA1_Channel4, DMA_IT_TC, ENABLE);
+	// DMA_ITConfig(DMA1_Channel4, DMA_IT_TC, ENABLE);
 	NVIC_EnableIRQ(DMA1_Channel4_IRQn);
 }
 
+/*******************************************************************************
+ * @brief  Конфигурация выводов общего назначения (GPIO)
+ ******************************************************************************/
 void GPIO_Configure()
 {
 	GPIO_InitTypeDef GPIO_InitStructure;
-
-	// Configure GPIOC.8-9 LED outputs
-	GPIO_InitStructure.GPIO_Pin = GPIO_Pin_8 | GPIO_Pin_9;
-	GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
-	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_Out_PP;
-	GPIO_Init(GPIOC, &GPIO_InitStructure);
 
 	// Configure 8-bit ADC_PORT.0-7 port for external ADC
 	GPIO_InitStructure.GPIO_Pin = 0x00FF; // [0:7] pins
@@ -143,22 +164,16 @@ void GPIO_Configure()
 	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_IPD;
 	GPIO_Init(ADC_PORT, &GPIO_InitStructure);
 
-	// Configure button pin (PA0)
-	GPIO_InitStructure.GPIO_Pin = GPIO_Pin_0;
+	// Configure CMP pin (PA1)
+	GPIO_InitStructure.GPIO_Pin = CMP_PIN;
+	GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
 	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_IPD;
-	GPIO_InitStructure.GPIO_Speed = GPIO_Speed_2MHz;
-	GPIO_Init(GPIOA, &GPIO_InitStructure);
+	GPIO_Init(CMP_PORT, &GPIO_InitStructure);
 
-	// Configure TIM3 output (PA6)
+	// Configure TIM3 (ADC CLK) input (PA6)
 	GPIO_InitStructure.GPIO_Pin   = GPIO_Pin_6;
 	GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
 	GPIO_InitStructure.GPIO_Mode  = GPIO_Mode_Out_PP;
-	GPIO_Init(GPIOA, &GPIO_InitStructure);
-
-	// Configure MCO output (PA8)
-	GPIO_InitStructure.GPIO_Pin   = GPIO_Pin_8;
-	GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
-	GPIO_InitStructure.GPIO_Mode  = GPIO_Mode_AF_PP;
 	GPIO_Init(GPIOA, &GPIO_InitStructure);
 
 	// Configure USART1 Tx (PA9) as alternate function push-pull
@@ -172,11 +187,55 @@ void GPIO_Configure()
 	GPIO_InitStructure.GPIO_Speed = GPIO_Speed_2MHz;
 	GPIO_InitStructure.GPIO_Mode  = GPIO_Mode_IN_FLOATING;
 	GPIO_Init(GPIOA, &GPIO_InitStructure);
+
+	// DEBUG
+
+	// Configure MCO output (PA8)
+	GPIO_InitStructure.GPIO_Pin   = GPIO_Pin_8;
+	GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
+	GPIO_InitStructure.GPIO_Mode  = GPIO_Mode_AF_PP;
+	GPIO_Init(GPIOA, &GPIO_InitStructure);
+
+	// Configure GPIOC.8-9 LED outputs
+	GPIO_InitStructure.GPIO_Pin = GPIO_Pin_8 | GPIO_Pin_9;
+	GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
+	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_Out_PP;
+	GPIO_Init(GPIOC, &GPIO_InitStructure);
+
+	// Configure button pin (PA0)
+	GPIO_InitStructure.GPIO_Pin = GPIO_Pin_0;
+	GPIO_InitStructure.GPIO_Speed = GPIO_Speed_2MHz;
+	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_IPD;
+	GPIO_Init(GPIOA, &GPIO_InitStructure);
+
+	// Configure DEBUG_PORT output pins
+	GPIO_InitStructure.GPIO_Pin = DEBUG_PORT_PINS;
+	GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
+	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_Out_PP;
+	GPIO_Init(DEBUG_PORT, &GPIO_InitStructure);
 }
 
+/*******************************************************************************
+ * @brief  Конфигурация внешних прерываний
+ ******************************************************************************/
 void EXTI_Configure()
 {
 	EXTI_InitTypeDef EXTI_InitStructure;
+
+	// CMP EXTI
+
+	GPIO_EXTILineConfig(GPIO_PortSourceGPIOA, GPIO_PinSource1);
+	GPIO_EventOutputConfig(GPIO_PortSourceGPIOA, GPIO_PinSource1);
+
+	EXTI_InitStructure.EXTI_Line = EXTI_Line1;
+	EXTI_InitStructure.EXTI_Mode = EXTI_Mode_Interrupt;
+	EXTI_InitStructure.EXTI_Trigger = EXTI_Trigger_Rising_Falling;
+	EXTI_InitStructure.EXTI_LineCmd = ENABLE;
+	EXTI_Init(&EXTI_InitStructure);
+
+	NVIC_EnableIRQ(EXTI1_IRQn);
+
+	// DEBUG
 
 	GPIO_EXTILineConfig(GPIO_PortSourceGPIOA, GPIO_PinSource0);
 	GPIO_EventOutputConfig(GPIO_PortSourceGPIOA, GPIO_PinSource0);
@@ -190,6 +249,9 @@ void EXTI_Configure()
 	NVIC_EnableIRQ(EXTI0_IRQn);
 }
 
+/*******************************************************************************
+ * @brief  Конфигурация асинхронного последовательного приёмо-передатчика (UART)
+ ******************************************************************************/
 void USART_Configure()
 {
 	USART_InitTypeDef USART_InitStructure;
@@ -211,6 +273,9 @@ void USART_Configure()
 	USART_Cmd(USART_PHY, ENABLE);
 }
 
+/*******************************************************************************
+ * @brief  Конфигурация задействованных таймеров
+ ******************************************************************************/
 void Timers_Configure()
 {
 	TIM_TimeBaseInitTypeDef TIM_TimeBaseStructure;
@@ -222,33 +287,45 @@ void Timers_Configure()
 	TIM_TimeBaseStructInit(&TIM_TimeBaseStructure);
 	TIM_TimeBaseStructure.TIM_Period        = 256;
 	TIM_TimeBaseStructure.TIM_Prescaler     = 0;
-	TIM_TimeBaseInit(TIM3, &TIM_TimeBaseStructure);
+	TIM_TimeBaseInit(ADC_CLK_TIMER, &TIM_TimeBaseStructure);
 
 	// Input Capture Mode configuration: Channel1
 	TIM_ICStructInit(&TIM_ICInitStructure);
-	TIM_ICInitStructure.TIM_Channel     = TIM_Channel_1;
-	TIM_ICInitStructure.TIM_ICPolarity  = TIM_ICPolarity_Rising;
-	TIM_ICInitStructure.TIM_ICSelection = TIM_ICSelection_DirectTI;
-	TIM_ICInitStructure.TIM_ICPrescaler = TIM_ICPSC_DIV1;
-	TIM_ICInitStructure.TIM_ICFilter    = 0;
-	TIM_ICInit(TIM3, &TIM_ICInitStructure);
+	// TIM_ICInitStructure.TIM_Channel     = TIM_Channel_1;
+	// TIM_ICInitStructure.TIM_ICPolarity  = TIM_ICPolarity_Rising;
+	// TIM_ICInitStructure.TIM_ICSelection = TIM_ICSelection_DirectTI;
+	// TIM_ICInitStructure.TIM_ICPrescaler = TIM_ICPSC_DIV1;
+	// TIM_ICInitStructure.TIM_ICFilter    = 0;
+	TIM_ICInit(ADC_CLK_TIMER, &TIM_ICInitStructure);
 
-	// Enable TIM3 DMA
-	TIM_DMACmd(TIM3, TIM_DMA_CC1, ENABLE);
+	// Enable DMA Event
+	TIM_DMACmd(ADC_CLK_TIMER, TIM_DMA_CC1, ENABLE);
 
-	// Session timer
+	// CMP timeout timer
 
 	TIM_TimeBaseStructInit(&TIM_TimeBaseStructure);
-	TIM_TimeBaseStructure.TIM_Period        = SESSION_LENGTH - 1;
+	TIM_TimeBaseStructure.TIM_Period        = CMP_TIMER_TIMEOUT - 1;
 	TIM_TimeBaseStructure.TIM_Prescaler     = 24000 - 1; // Period in ms
-	TIM_TimeBaseInit(TIM2, &TIM_TimeBaseStructure);
+	TIM_TimeBaseInit(CMP_TIMER, &TIM_TimeBaseStructure);
 
-	TIM_ITConfig(TIM2, TIM_IT_Update, ENABLE);
+	TIM_ITConfig(CMP_TIMER, TIM_IT_Update, ENABLE);
+	NVIC_EnableIRQ(TIM4_IRQn);
+	TIM_ClearITPendingBit(CMP_TIMER, TIM_IT_Update);
+
+	// Report timer
+
+	TIM_TimeBaseStructInit(&TIM_TimeBaseStructure);
+	TIM_TimeBaseStructure.TIM_Period        = REPORT_TIMEOUT - 1;
+	TIM_TimeBaseStructure.TIM_Prescaler     = 24000 - 1; // Period in ms
+	TIM_TimeBaseInit(REPORT_TIMER, &TIM_TimeBaseStructure);
+
+	TIM_ITConfig(REPORT_TIMER, TIM_IT_Update, ENABLE);
 	NVIC_EnableIRQ(TIM2_IRQn);
+	TIM_ClearITPendingBit(REPORT_TIMER, TIM_IT_Update);
 }
 
 /*******************************************************************************
- * Logic
+ * Логика работы
  ******************************************************************************/
 
 void ToggleLED1()
@@ -268,12 +345,19 @@ void ToggleLED2()
 void HALT(uint8_t debugChar)
 {
 	__disable_irq();
-	StopCaptureADC();
+	StopMonitoring();
 	GPIO_WriteBit(LED_PORT, LED_1, Bit_RESET);
+	GPIO_WriteBit(LED_PORT, LED_2, Bit_RESET);
 	USART_SendData(USART_PHY, debugChar);
 	while (1) { }
 }
 
+/*******************************************************************************
+ * @brief  Настраивает канал DMA-контроллера, связанный с USART-передатчиком,
+ *         на передачу массива данных
+ * @param  memoryAddr Адрес начала массива с данными 
+ * @param  bufferSize Размер блока данных в байтах
+ ******************************************************************************/
 void RestartTxDMA(uint32_t memoryAddr, uint32_t bufferSize)
 {
 	if (dmaTxBusy == Bit_SET) {
@@ -281,6 +365,7 @@ void RestartTxDMA(uint32_t memoryAddr, uint32_t bufferSize)
 	}
 
 	dmaTxBusy = Bit_SET;
+	GPIO_WriteBit(DEBUG_PORT, DEBUG_PIN_SEND, Bit_SET);
 
 	DMA_Cmd(DMA1_Channel4, DISABLE);
 	DMA_DeInit(DMA1_Channel4);
@@ -294,69 +379,96 @@ void RestartTxDMA(uint32_t memoryAddr, uint32_t bufferSize)
 	DMA_Cmd(DMA1_Channel4, ENABLE);
 }
 
-void wipeSessionData(uint16_t index)
+/*******************************************************************************
+ * @brief  Преобразование порядка байт в 32-битном числе от младшего к старшему
+ * @param  value Значение с младшим порядком байт
+ * @retval Значение со старшим порядком байт
+ ******************************************************************************/
+uint32_t Swap(uint32_t value)
 {
-	session.buffer->sum[index]     = 0;
-	session.buffer->count[index]   = 0;
-	session.buffer->countOV[index] = 0;
+	uint32_t swapped = ((value >> 24) & 0xff)     |  // move byte 3 to byte 0
+	                   ((value << 8)  & 0xff0000) |  // move byte 1 to byte 2
+	                   ((value >> 8)  & 0xff00)   |  // move byte 2 to byte 1
+	                   ((value << 24) & 0xff000000); // byte 0 to byte 3
+	return swapped;
 }
 
-void StartCaptureADC()
+/*******************************************************************************
+ * @brief  Старт мониторинга
+ ******************************************************************************/
+void StartMonitoring()
 {
 	__disable_irq();
-	if (captureADCState == Bit_RESET) {
+	if (monitoringState == Bit_RESET) {
 		ToggleLED2();
 
-		captureADCState = Bit_SET;
+		monitoringState = Bit_SET;
 
-		// Start from scratch
-		DMA_SetCurrDataCounter(DMA1_Channel6, DMA_ADC_SIZE * 2);
-		TIM_SetCounter(TIM2, 0);
-		session.head = 0;
-		session.buffer = &session.buffer1;
-		wipeSessionData(0);
+		// Flush variables
+		cmpCounter = 0;
+		adcSum = 0;
+		adcSumCount = 0;
 
-		// Enable session timer
-		TIM_SetCounter(TIM2, 0);
-		TIM_Cmd(TIM2, ENABLE);
+		// Fire report handler to send first report
+		GPIO_WriteBit(DEBUG_PORT, DEBUG_PIN_REPORT, Bit_SET);
+		Report();
+		GPIO_WriteBit(DEBUG_PORT, DEBUG_PIN_REPORT, Bit_RESET);
 
-		// Enable capturing
-		TIM_DMACmd(TIM3, TIM_DMA_CC1, ENABLE);
-		DMA_Cmd(DMA1_Channel6, ENABLE);
+		// Fire CMP handler to fix starting from HIGH pin state
+		CMP_Handler();
+
+		// Enable report timer
+		TIM_SetCounter(REPORT_TIMER, 0);
+		TIM_Cmd(REPORT_TIMER, ENABLE);
 	}
 	__enable_irq();
 }
 
-void StopCaptureADC()
+/*******************************************************************************
+ * @brief  Остановка мониторинга
+ ******************************************************************************/
+void StopMonitoring()
 {
 	__disable_irq();
-	if (captureADCState == Bit_SET) {
+	if (monitoringState == Bit_SET) {
 		ToggleLED2();
 
-		// Stop capture
-		DMA_Cmd(DMA1_Channel6, DISABLE);
-		TIM_DMACmd(TIM3, TIM_DMA_CC1, DISABLE);
+		// Stop report timer
+		TIM_Cmd(REPORT_TIMER, DISABLE);
 
-		// Stop session timer
-		TIM_Cmd(TIM2, DISABLE);
+		// Turn GPIO grabber off
+		CMP_HandleState(Bit_RESET);
 
-		captureADCState = Bit_RESET;
+		monitoringState = Bit_RESET;
 	}
 	__enable_irq();
 }
 
-void ToggleCaptureADC()
+/*******************************************************************************
+ * @brief  Сменить состояние мониторинга (включить/выключить).
+ *         Действие зависит от текущего состояния
+ ******************************************************************************/
+void ToggleMonitoring()
 {
-	if (captureADCState == Bit_RESET) {
-		StartCaptureADC();
+	if (monitoringState == Bit_RESET) {
+		StartMonitoring();
 	} else {
-		StopCaptureADC();
+		StopMonitoring();
 	}
 }
 
-
+/*******************************************************************************
+ * @brief  Обработка блока данных, собранных DMA-контроллером с 8-битной шины
+ * @param  bufferBasePos Адрес начала блока данных
+ * @param  bytesCount    Размер блока данных в байтах
+ ******************************************************************************/
 void SumADCData(uint16_t bufferBasePos, uint16_t bytesCount)
 {
+	// Zero count leads to endless for- loop
+	if (bytesCount == 0) {
+		return;
+	}
+
 	static BitAction ADCSumBusy = Bit_RESET;
 	if (ADCSumBusy == Bit_SET) {
 		HALT('S');
@@ -365,37 +477,111 @@ void SumADCData(uint16_t bufferBasePos, uint16_t bytesCount)
 
 	uint32_t sum     = 0;
 	uint32_t count   = 0;
-	uint32_t countOV = 0;
 
 	for (; count <= bytesCount - 1; ++count) {
-		uint8_t byte = dmaADCBuffer[bufferBasePos + count];
-		sum += byte;
-		if (byte > ADCReference) {
-			++countOV;
-		}
+		uint8_t byte = adcBuffer[bufferBasePos + count];
+		sum += byte - adcRef;
 	}
 
 	__disable_irq();
-	session.buffer->sum[session.head]     += sum;
-	session.buffer->count[session.head]   += count;
-	session.buffer->countOV[session.head] += countOV;
+	adcSum += sum;
+	adcSumCount += count;
 	__enable_irq();
 
 	ADCSumBusy = Bit_RESET;
 }
 
 /*******************************************************************************
- * Interrupt handlers
+ * Обработчики прерываний
  ******************************************************************************/
 
+// DEBUG
+// Button external interrupt vector
 void EXTI0_IRQHandler()
 {
 	if (EXTI_GetITStatus(EXTI_Line0)) {
-		StopCaptureADC();
+		StopMonitoring();
 		EXTI_ClearITPendingBit(EXTI_Line0);
 	}
 }
 
+/*******************************************************************************
+ * @brief  Логика обработки прерывания от компаратора
+ *         Обрабатывает состояние, переданное первым параметром
+ * @param  state Состояние, которое необходимо обработать
+ * @see    EXTI1_IRQHandler()
+ * @see    CMP_Handler()
+ ******************************************************************************/
+void CMP_HandleState(BitAction state)
+{
+	GPIO_WriteBit(DEBUG_PORT, DEBUG_PIN_CMP, Bit_SET);
+	GPIO_WriteBit(LED_PORT, LED_1, state);
+
+	if (state == Bit_SET) {
+		// Increment CMP counter
+		++cmpCounter;
+
+		// Enable CMP timer
+		TIM_SetCounter(CMP_TIMER, 0);
+		TIM_Cmd(CMP_TIMER, ENABLE);
+
+		// Flush DMA state variables
+		DMA_SetCurrDataCounter(DMA1_Channel6, ADC_DMA_SIZE * 2);
+
+		// Enable capturing GPIO data
+		TIM_DMACmd(ADC_CLK_TIMER, TIM_DMA_CC1, ENABLE);
+		DMA_Cmd(DMA1_Channel6, ENABLE);
+	}
+	else {
+		// Disable CMP timer
+		TIM_Cmd(CMP_TIMER, DISABLE);
+
+		// Disable capturing GPIO data
+		DMA_Cmd(DMA1_Channel6, DISABLE);
+		TIM_DMACmd(ADC_CLK_TIMER, TIM_DMA_CC1, DISABLE);
+
+		// Process captured part of DMA buffer
+		uint16_t count = (ADC_DMA_SIZE * 2) - DMA_GetCurrDataCounter(DMA1_Channel6);
+		if (count >= ADC_DMA_SIZE) {
+			count -= ADC_DMA_SIZE;
+			SumADCData(ADC_DMA_SIZE, count);
+		}
+		else {
+			SumADCData(0, count);
+		}
+	}
+
+	GPIO_WriteBit(DEBUG_PORT, DEBUG_PIN_CMP, Bit_RESET);
+}
+
+/*******************************************************************************
+ * @brief  Логика обработки прерывания от компаратора.
+ *         Обрабатывает текущее состояние компаратора
+ * @see    EXTI1_IRQHandler()
+ * @see    CMP_HandleState()
+ ******************************************************************************/
+void CMP_Handler()
+{
+	BitAction state = GPIO_ReadInputDataBit(CMP_PORT, CMP_PIN);
+	CMP_HandleState(state);
+}
+
+/*******************************************************************************
+ * @brief  Обработчик внешнего прерывания от компаратора
+ * @see    CMP_Handler()
+ * @see    CMP_HandleState()
+ ******************************************************************************/
+void EXTI1_IRQHandler()
+{
+	if (EXTI_GetITStatus(EXTI_Line1)) {
+		CMP_Handler();
+		EXTI_ClearITPendingBit(EXTI_Line1);
+	}
+}
+
+/*******************************************************************************
+ * @brief  Обработчик прерывания от USART-приёмника
+ ******************************************************************************/
 void USART1_IRQHandler()
 {
 	if (USART_GetITStatus(USART_PHY, USART_IT_RXNE)) {
@@ -403,7 +589,10 @@ void USART1_IRQHandler()
 
 		switch (data) {
 			case 'S':
-				ToggleCaptureADC();
+				ToggleMonitoring();
+				break;
+			case 'R':
+				Report();
 				break;
 			case 'G':
 				data = (uint8_t)GPIO_ReadInputData(GPIOC);
@@ -418,81 +607,112 @@ void USART1_IRQHandler()
 	}
 }
 
-void DMA1_Channel4_IRQHandler(void)
+/*******************************************************************************
+ * @brief  Обработчик прерывания от канала DMA, связанного с USART-передатчиком
+ ******************************************************************************/
+void DMA1_Channel4_IRQHandler()
 {
 	if (DMA_GetITStatus(DMA1_IT_TC4)) {
+		GPIO_WriteBit(DEBUG_PORT, DEBUG_PIN_SEND, Bit_RESET);
+
 		dmaTxBusy = Bit_RESET;
 		DMA_ClearITPendingBit(DMA1_IT_TC4);
 	}
 }
 
+/*******************************************************************************
+ * @brief  Прерывание от канала DMA, собирающего данные с внешнего АЦП.
+ *         Срабатывает при заполнении каждой из половин буфера данных
+ ******************************************************************************/
 void DMA1_Channel6_IRQHandler()
 {
-	NVIC_DisableIRQ(DMA1_Channel6_IRQn);
+	// NVIC_DisableIRQ(DMA1_Channel6_IRQn);
+	GPIO_WriteBit(DEBUG_PORT, DEBUG_PIN_ADC_DMA, Bit_SET);
 
 	if (DMA_GetITStatus(DMA1_IT_HT6)) {
 		DMA_ClearITPendingBit(DMA1_IT_HT6);
 
-		SumADCData(0, DMA_ADC_SIZE);
+		SumADCData(0, ADC_DMA_SIZE);
 	}
 
 	if (DMA_GetITStatus(DMA1_IT_TC6)) {
 		DMA_ClearITPendingBit(DMA1_IT_TC6);
 
-		SumADCData(DMA_ADC_SIZE, DMA_ADC_SIZE);
+		SumADCData(ADC_DMA_SIZE, ADC_DMA_SIZE);
 	}
 
-	NVIC_EnableIRQ(DMA1_Channel6_IRQn);
+	GPIO_WriteBit(DEBUG_PORT, DEBUG_PIN_ADC_DMA, Bit_RESET);
+	// NVIC_EnableIRQ(DMA1_Channel6_IRQn);
 }
 
+/*******************************************************************************
+ * @brief  Формирование и передача отчёта по USART
+ ******************************************************************************/
+void Report()
+{
+	uint32_t data[] = {Swap(cmpCounter), Swap(adcSum), Swap(adcSumCount)};
+	memcpy(dmaTxBuffer, (const uint8_t *)&data, sizeof(data));
+	RestartTxDMA(&dmaTxBuffer, sizeof(data));
+}
+
+/*******************************************************************************
+ * @brief  Обрабочик прерывания от таймера передачи отчётов.
+ *         Обеспечивает передачу отчёта через дискретные интервалы времени
+ ******************************************************************************/
 void TIM2_IRQHandler()
 {
-	if (TIM_GetITStatus(TIM2, TIM_IT_Update)) {
+	if (TIM_GetITStatus(REPORT_TIMER, TIM_IT_Update)) {
+		GPIO_WriteBit(DEBUG_PORT, DEBUG_PIN_REPORT, Bit_SET);
+
 		__disable_irq();
-		TIM_Cmd(TIM2, DISABLE);
+		TIM_Cmd(REPORT_TIMER, DISABLE);
 
-		ToggleLED2();
+		Report();
+		TIM_ClearITPendingBit(REPORT_TIMER, TIM_IT_Update);
 
-		++session.head;
-		if (session.head == SESSION_SIZE) {
-			// Send first part of array
-			RestartTxDMA(session.buffer, sizeof(SessionBuffer));
-
-			// Swap buffer
-			session.buffer = (session.buffer == &session.buffer2) ? &session.buffer1 : &session.buffer2;
-			session.head = 0;
-		}
-
-		wipeSessionData(session.head);
-
-		TIM_ClearITPendingBit(TIM2, TIM_IT_Update);
-
-		TIM_SetCounter(TIM2, 0);
-		TIM_Cmd(TIM2, ENABLE);
+		TIM_Cmd(REPORT_TIMER, ENABLE);
 		__enable_irq();
+
+		GPIO_WriteBit(DEBUG_PORT, DEBUG_PIN_REPORT, Bit_RESET);
 	}
 }
 
 /*******************************************************************************
- * @brief  Configuration and run loop
+ * @brief  Прерывание от таймера тайм-аута выброса акустической эмиссии.
+ *         Ограничивает выброс по заданной максимальной единичной длительности
+ ******************************************************************************/
+void TIM4_IRQHandler()
+{
+	if (TIM_GetITStatus(CMP_TIMER, TIM_IT_Update)) {
+		GPIO_WriteBit(DEBUG_PORT, DEBUG_PIN_CMP_TMR, Bit_SET);
+
+		++cmpCounter;
+		TIM_ClearITPendingBit(CMP_TIMER, TIM_IT_Update);
+
+		GPIO_WriteBit(DEBUG_PORT, DEBUG_PIN_CMP_TMR, Bit_RESET);
+	}
+}
+
+/*******************************************************************************
+ * @brief  Главный код
  ******************************************************************************/
 int main()
 {
 	__disable_irq();
-
 	RCC_Configure();
 	DMA_Configure();
 	GPIO_Configure();
 	EXTI_Configure();
 	USART_Configure();
 	Timers_Configure();
-
-	TIM_ClearITPendingBit(TIM2, TIM_IT_Update);
-
-	GPIO_WriteBit(LED_PORT, LED_1, Bit_SET); // Device is ready
+	ToggleLED1(); // Device is ready
 	__enable_irq();
 
-	while (1) {}
+	// DEBUG!
+	adcRef = 0x80;
+	ToggleMonitoring();
 
+	// Endless loop..
+	while (1) {}
 	return 0;
 }
