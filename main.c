@@ -29,7 +29,7 @@
 #define CMP_PIN             GPIO_Pin_1
 
 #define CMP_TIMER           TIM4
-#define CMP_TIMER_TIMEOUT   100 // мс
+#define CMP_TIMER_TIMEOUT   1000 // мс
 
 #define ADC_CLK_TIMER       TIM3
 #define ADC_PORT            GPIOC
@@ -498,7 +498,7 @@ void SumADCData(uint16_t bufferBasePos, uint16_t bytesCount)
 // Внешнее прерывание от нажатия кнопки
 void EXTI0_IRQHandler()
 {
-	if (EXTI_GetITStatus(EXTI_Line0)) {
+	if (EXTI_GetITStatus(EXTI_Line0) != RESET) {
 		StopMonitoring();
 		EXTI_ClearITPendingBit(EXTI_Line0);
 	}
@@ -517,19 +517,20 @@ void CMP_HandleState(BitAction state)
 	GPIO_WriteBit(LED_PORT, LED_1, state);
 
 	if (state == Bit_SET) {
-		// Увеличиваем счётчик выбросов / срабатываний компаратора
-		++cmpCounter;
-
-		// Включаем таймер тайм-аута выброса
-		TIM_SetCounter(CMP_TIMER, 0);
-		TIM_Cmd(CMP_TIMER, ENABLE);
-
 		// Сбрасываем канал DMA сбора данных с АЦП
 		DMA_SetCurrDataCounter(DMA1_Channel6, ADC_DMA_SIZE * 2);
 
 		// Начинаем сбор данных с АЦП
 		TIM_DMACmd(ADC_CLK_TIMER, TIM_DMA_CC1, ENABLE);
 		DMA_Cmd(DMA1_Channel6, ENABLE);
+
+		// Увеличиваем счётчик выбросов / срабатываний компаратора
+		++cmpCounter;
+
+		// Включаем таймер тайм-аута выброса
+		TIM_SetCounter(CMP_TIMER, 0);
+		TIM_ClearITPendingBit(CMP_TIMER, TIM_IT_Update);
+		TIM_Cmd(CMP_TIMER, ENABLE);
 	}
 	else {
 		// Выключаем таймер тайм-аута выброса
@@ -572,7 +573,7 @@ void CMP_Handler()
  ******************************************************************************/
 void EXTI1_IRQHandler()
 {
-	if (EXTI_GetITStatus(EXTI_Line1)) {
+	if (EXTI_GetITStatus(EXTI_Line1) != RESET) {
 		CMP_Handler();
 		EXTI_ClearITPendingBit(EXTI_Line1);
 	}
@@ -668,14 +669,8 @@ void TIM2_IRQHandler()
 	if (TIM_GetITStatus(REPORT_TIMER, TIM_IT_Update)) {
 		GPIO_WriteBit(DEBUG_PORT, DEBUG_PIN_REPORT, Bit_SET);
 
-		__disable_irq();
-		TIM_Cmd(REPORT_TIMER, DISABLE);
-
 		Report();
 		TIM_ClearITPendingBit(REPORT_TIMER, TIM_IT_Update);
-
-		TIM_Cmd(REPORT_TIMER, ENABLE);
-		__enable_irq();
 
 		GPIO_WriteBit(DEBUG_PORT, DEBUG_PIN_REPORT, Bit_RESET);
 	}
@@ -714,7 +709,7 @@ int main()
 	__enable_irq();
 
 	// DEBUG!
-	adcRef = 0x80;
+	adcRef = 0x00;
 	ToggleMonitoring();
 
 	// Бесконечный цикл ожидания прерываний
