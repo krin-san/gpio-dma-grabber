@@ -57,19 +57,18 @@
 #define DEBUG_PORT_PINS     (DEBUG_PIN_CMP | DEBUG_PIN_CMP_TMR | DEBUG_PIN_ADC_DMA | DEBUG_PIN_REPORT | DEBUG_PIN_SEND)
 
 /*******************************************************************************
- * Структуры данных
- ******************************************************************************/
-
-
-
-/*******************************************************************************
  * Глобальные переменные
  ******************************************************************************/
 
-uint32_t cmpCounter;
-
+// Опорное значение. Задаётся посредством команды Configure (C)
 uint8_t  adcRef;
+
+// Счетчик превышений АЭ
+uint32_t cmpCounter;
+// Сумма значений, собранных с АЦП. Может случиться переполнение, поэтому софт
+//   принимающей стороны должен это обработать
 uint32_t adcSum;
+// Количество значений, собранных с АЦП
 uint32_t adcSumCount;
 
 BitAction monitoringState = Bit_RESET;
@@ -588,18 +587,23 @@ void USART1_IRQHandler()
 		uint8_t data = USART_ReceiveData(USART_PHY);
 
 		switch (data) {
-			case 'S':
-				ToggleMonitoring();
+			case 'C': // Configure
 				break;
-			case 'R':
+			case 'S': // Start
+				StartMonitoring();
+				break;
+			case 'E': // End
+				StopMonitoring();
+				break;
+			case 'R': // DEBUG
 				Report();
 				break;
-			case 'G':
+			case 'G': // DEBUG
 				data = (uint8_t)GPIO_ReadInputData(GPIOC);
 				USART_SendData(USART_PHY, data);
 				break;
 			default:
-				USART_SendData(USART_PHY, data);
+				USART_SendData(USART_PHY, data); // DEBUG
 				break;
 		}
 
