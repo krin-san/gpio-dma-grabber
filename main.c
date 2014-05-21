@@ -56,6 +56,35 @@
 //#define DEBUG_PIN_        GPIO_Pin_15
 #define DEBUG_PORT_PINS     (DEBUG_PIN_CMP | DEBUG_PIN_CMP_TMR | DEBUG_PIN_ADC_DMA | DEBUG_PIN_REPORT | DEBUG_PIN_SEND)
 
+// Для удобства восприятия
+#define bool                BitAction
+#define true                Bit_SET
+#define false               Bit_RESET
+
+/*******************************************************************************
+ * Перечисления
+ ******************************************************************************/
+
+// Коды команд
+enum CmdInput {
+	CmdInputPing     = 'P',
+	CmdInputSetRef   = 'O',
+	CmdInputGetRef   = 'T',
+	CmdInputStart    = 'S',
+	CmdInputStop     = 'V'
+}
+enum CmdOutput {
+	CmdOutputACK     = 'Y',
+	CmdOutputError   = 'H',
+	CmdOutputGetRef  = 'T',
+	CmdOutputReport  = 'R'
+}
+
+// Коды ошибок
+enum ErrorCode {
+	ErrorCodeUnknown = '0'
+}
+
 /*******************************************************************************
  * Глобальные переменные
  ******************************************************************************/
@@ -74,13 +103,31 @@ uint32_t adcSumCount;
 BitAction monitoringState = Bit_RESET;
 __IO uint8_t adcBuffer[ADC_DMA_SIZE * 2];
 
-DMA_InitTypeDef dmaTx;
-BitAction dmaTxBusy = Bit_RESET;
-__IO uint8_t dmaTxBuffer[16];
+// Линейный буфер приёма по UART
+#define RX_BUF_SIZE 4
+struct {
+	     bool    waitCmd;
+	     uint8_t head;
+	__IO uint8_t buf[RX_BUF_SIZE];
+} rx;
+
+// Кольцевой буфер передачи по UART
+#define TX_BUF_SIZE 32
+struct {
+	DMA_InitTypeDef dmaCfg;
+	     bool       busy;
+	     bool       waitCmd;
+	     uint8_t    head;
+	     uint8_t    tail;
+	__IO uint8_t    buf[TX_BUF_SIZE];
+} tx;
 
 /*******************************************************************************
  * Прототипы функций
  ******************************************************************************/
+
+uint8_t CharToHex(uint8_t c);
+uint8_t HexToChar(uint8_t h);
 
 void StopMonitoring();
 void CMP_HandleState(BitAction);
@@ -134,17 +181,17 @@ void DMA_Configure()
 
 	// Канал DMA для отправки буфера данных по USART
 
-	DMA_StructInit(&dmaTx);
-	dmaTx.DMA_PeripheralBaseAddr = (uint32_t)&USART1->DR;
-	// dmaTx.DMA_MemoryBaseAddr     = (uint32_t)&dmaTxBuffer[0];
-	dmaTx.DMA_DIR                = DMA_DIR_PeripheralDST;
-	// dmaTx.DMA_BufferSize         = DMA_TX_SIZE;
-	dmaTx.DMA_PeripheralInc      = DMA_PeripheralInc_Disable;
-	dmaTx.DMA_MemoryInc          = DMA_MemoryInc_Enable;
-	dmaTx.DMA_PeripheralDataSize = DMA_PeripheralDataSize_Byte;
-	dmaTx.DMA_MemoryDataSize     = DMA_MemoryDataSize_Byte;
-	dmaTx.DMA_Priority           = DMA_Priority_Low;
-	// DMA_Init(DMA1_Channel4, &dmaTx);
+	DMA_StructInit(&(tx.dmaCfg));
+	tx.dmaCfg.DMA_PeripheralBaseAddr = (uint32_t)&USART1->DR;
+	// tx.dmaCfg.DMA_MemoryBaseAddr     = (uint32_t)&(tx.buf);
+	tx.dmaCfg.DMA_DIR                = DMA_DIR_PeripheralDST;
+	// tx.dmaCfg.DMA_BufferSize         = DMA_TX_SIZE;
+	tx.dmaCfg.DMA_PeripheralInc      = DMA_PeripheralInc_Disable;
+	tx.dmaCfg.DMA_MemoryInc          = DMA_MemoryInc_Enable;
+	tx.dmaCfg.DMA_PeripheralDataSize = DMA_PeripheralDataSize_Byte;
+	tx.dmaCfg.DMA_MemoryDataSize     = DMA_MemoryDataSize_Byte;
+	tx.dmaCfg.DMA_Priority           = DMA_Priority_Low;
+	// DMA_Init(DMA1_Channel4, &(tx.dmaCfg));
 
 	// DMA_ITConfig(DMA1_Channel4, DMA_IT_TC, ENABLE);
 	NVIC_EnableIRQ(DMA1_Channel4_IRQn);
@@ -266,7 +313,6 @@ void USART_Configure()
 	USART_DMACmd(USART1, USART_DMAReq_Tx, ENABLE);
 
 	USART_ITConfig(USART_PHY, USART_IT_RXNE, ENABLE);
-
 	NVIC_EnableIRQ(USART1_IRQn);
 
 	USART_Cmd(USART_PHY, ENABLE);
@@ -323,9 +369,8 @@ void Timers_Configure()
 	TIM_ClearITPendingBit(REPORT_TIMER, TIM_IT_Update);
 }
 
-/*******************************************************************************
- * Логика работы
- ******************************************************************************/
+
+
 
 void ToggleLED1()
 {
@@ -341,41 +386,106 @@ void ToggleLED2()
 	GPIO_WriteBit(LED_PORT, LED_2, state);
 }
 
-void HALT(uint8_t debugChar)
-{
-	__disable_irq();
-	StopMonitoring();
-	GPIO_WriteBit(LED_PORT, LED_1, Bit_RESET);
-	GPIO_WriteBit(LED_PORT, LED_2, Bit_RESET);
-	USART_SendData(USART_PHY, debugChar);
-	while (1) { }
-}
+
+
+/*******************************************************************************
+ * Приём-передача
+ ******************************************************************************/
 
 /*******************************************************************************
  * @brief  Настраивает канал DMA-контроллера, связанный с USART-передатчиком,
- *         на передачу массива данных
- * @param  memoryAddr Адрес начала массива с данными 
- * @param  bufferSize Размер блока данных в байтах
+ *         на передачу отложенных в буфере передачи данных
  ******************************************************************************/
-void RestartTxDMA(uint32_t memoryAddr, uint32_t bufferSize)
+void Send()
 {
-	if (dmaTxBusy == Bit_SET) {
-		HALT('T');
+	// Ожидаем окончания предыдущей передачи и не пытаемся передать пустоту
+	if (tx.busy == true || tx.head == tx.tail) {
+		return;
 	}
 
-	dmaTxBusy = Bit_SET;
+	tx.busy = true;
 	GPIO_WriteBit(DEBUG_PORT, DEBUG_PIN_SEND, Bit_SET);
 
 	DMA_Cmd(DMA1_Channel4, DISABLE);
 	DMA_DeInit(DMA1_Channel4);
 
-	dmaTx.DMA_MemoryBaseAddr = memoryAddr;
-	dmaTx.DMA_BufferSize     = bufferSize;
-	DMA_Init(DMA1_Channel4, &dmaTx);
+	// Можно передать только в линейном порядке, поэтому данные, разбитые концом
+	//   буфера, будут переданы в два захода: (tail -> end) & (start -> head)
+	uint8_t size = (tx.tail < tx.head) ? (tx.head - tx.tail) : (TX_BUF_SIZE - tx.tail);
+	tx.dmaCfg.DMA_MemoryBaseAddr = &(tx.buf[tx.tail]);
+	tx.dmaCfg.DMA_BufferSize     = size;
+	DMA_Init(DMA1_Channel4, &(tx.dmaCfg));
 
 	DMA_ITConfig(DMA1_Channel4, DMA_IT_TC, ENABLE);
-
 	DMA_Cmd(DMA1_Channel4, ENABLE);
+}
+
+void QueueByte(uint8_t byte)
+{
+	tx.buf[tx.head] = byte;
+	tx.head++;
+
+	if (tx.head == TX_BUF_SIZE) {
+		// Не ломаем цикличность буфера
+		tx.head = 0;
+	}
+}
+
+void QueueACK()
+{
+	QueueByte(CmdOutputACK);
+	Send();
+}
+
+void QueueData(CmdOutput cmd, uint8_t *data, uint8_t size)
+{
+	QueueByte(cmd);
+
+	for (uint8_t i = 0; i < size; ++i) {
+		QueueByte(HexToChar(*data >> 4));
+		QueueByte(HexToChar(*data));
+		data++;
+	}
+
+	Send();
+}
+
+/*******************************************************************************
+ * @brief  Сообщает об ошибке с заданным кодом
+ ******************************************************************************/
+void QueueError(ErrorCode code)
+{
+	QueueByte(CmdOutputError);
+	QueueByte(code);
+	Send();
+}
+
+/*******************************************************************************
+ * @brief  Сообщает о критической ошибке с заданным кодом
+ *         После этого ход выполнения программы прервётся до сброса
+ ******************************************************************************/
+void HALT(ErrorCode code)
+{
+	// Не позволим работу по прерываниям после критической ошибки
+	__disable_irq();
+
+	// Остановим активную периферию
+	StopMonitoring();
+	
+	// Включим иллюминацию на отладочной плате
+	GPIO_WriteBit(LED_PORT, LED_1, Bit_RESET);
+	GPIO_WriteBit(LED_PORT, LED_2, Bit_RESET);
+
+	// Сломаем буфер отправки, чтобы выслать данные об ошибке
+	DMA_Cmd(DMA1_Channel4, DISABLE);
+	DMA_DeInit(DMA1_Channel4);
+	tx.busy = false;
+	tx.head = 0;
+	tx.tail = 0;
+	QueueError(code);
+
+	// Заснуть навсегда
+	__WFI();
 }
 
 /*******************************************************************************
@@ -391,6 +501,55 @@ uint32_t Swap(uint32_t value)
 	                   ((value << 24) & 0xff000000); // byte 0 to byte 3
 	return swapped;
 }
+
+/*******************************************************************************
+ * @brief  .
+ * @param  .
+ * @retval .
+ ******************************************************************************/
+uint8_t CharToHex(uint8_t c)
+{
+	uint8_t h;
+	
+	if (c > '9') {
+		h = c - 'A' + 0xA;
+	} else {
+		h = c - '0';
+	}
+
+	// Foolproof
+	h &= 0x0F;
+
+	return h;
+}
+
+/*******************************************************************************
+ * @brief  .
+ * @param  .
+ * @retval .
+ ******************************************************************************/
+uint8_t HexToChar(uint8_t h)
+{
+	uint8_t c;
+	
+	// Foolproof
+	h &= 0x0F;
+
+	if (h > 0x9) {
+		c = h - 0xA + 'A';
+	} else {
+		c = h + '0';
+	}
+
+	return c;
+}
+
+
+
+
+/*******************************************************************************
+ * Мониторинг
+ ******************************************************************************/
 
 /*******************************************************************************
  * @brief  Старт мониторинга
@@ -490,6 +649,8 @@ void SumADCData(uint16_t bufferBasePos, uint16_t bytesCount)
 	ADCSumBusy = Bit_RESET;
 }
 
+
+
 /*******************************************************************************
  * Обработчики прерываний
  ******************************************************************************/
@@ -587,23 +748,39 @@ void USART1_IRQHandler()
 		uint8_t data = USART_ReceiveData(USART_PHY);
 
 		switch (data) {
-			case 'C': // Configure
+			case CmdInputPing:
+				QueueACK();
 				break;
-			case 'S': // Start
+
+			case CmdInputSetRef:
+				QueueError(ErrorCodeUnknown);
+				break;
+
+			case CmdInputGetRef:
+				QueueError(ErrorCodeUnknown);
+				break;
+
+			case CmdInputStart:
 				StartMonitoring();
+				QueueACK();
 				break;
-			case 'E': // End
+
+			case CmdInputStop:
 				StopMonitoring();
+				QueueACK();
 				break;
-			case 'R': // DEBUG
+
+			case CmdOutputReport: // DEBUG
 				Report();
 				break;
+
 			case 'G': // DEBUG
 				data = (uint8_t)GPIO_ReadInputData(GPIOC);
 				USART_SendData(USART_PHY, data);
 				break;
+				
 			default:
-				USART_SendData(USART_PHY, data); // DEBUG
+				QueueError(ErrorCodeUnknown);
 				break;
 		}
 
@@ -619,7 +796,15 @@ void DMA1_Channel4_IRQHandler()
 	if (DMA_GetITStatus(DMA1_IT_TC4)) {
 		GPIO_WriteBit(DEBUG_PORT, DEBUG_PIN_SEND, Bit_RESET);
 
-		dmaTxBusy = Bit_RESET;
+		// Помечаем байты, как переданные
+		tx.tail += (uint8_t)tx.dmaCfg.DMA_BufferSize;
+
+		if (tx.tail == TX_BUF_SIZE) {
+			// Не ломаем цикличность буфера
+			tx.tail = 0;
+		}
+
+		tx.busy = false;
 		DMA_ClearITPendingBit(DMA1_IT_TC4);
 	}
 }
@@ -655,8 +840,8 @@ void DMA1_Channel6_IRQHandler()
 void Report()
 {
 	uint32_t data[] = {Swap(cmpCounter), Swap(adcSum), Swap(adcSumCount)};
-	memcpy(dmaTxBuffer, (const uint8_t *)&data, sizeof(data));
-	RestartTxDMA(&dmaTxBuffer, sizeof(data));
+	uint8_t *data8  = (uint8_t &)&data;
+	QueueData(CmdOutputReport, data8, sizeof(data));
 }
 
 /*******************************************************************************
@@ -712,10 +897,6 @@ int main()
 	Timers_Configure();
 	ToggleLED1(); // Устройство готово
 	__enable_irq();
-
-	// DEBUG!
-	adcRef = 0x80;
-	ToggleMonitoring();
 
 	// Бесконечный цикл ожидания прерываний
 	while (1) {}
