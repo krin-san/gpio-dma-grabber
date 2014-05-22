@@ -463,22 +463,23 @@ void ToggleMonitoring()
  ******************************************************************************/
 void SumADCData(uint16_t bufferBasePos, uint16_t bytesCount)
 {
+	static BitAction ADCSumBusy = Bit_RESET;
+	uint32_t sum     = 0;
+	uint32_t count   = 0;
+	uint8_t  byte;
+	
 	// Нулевое значение переменной приведёт к бесконечному циклу for
 	if (bytesCount == 0) {
 		return;
 	}
 
-	static BitAction ADCSumBusy = Bit_RESET;
 	if (ADCSumBusy == Bit_SET) {
 		HALT('S');
 	}
 	ADCSumBusy = Bit_SET;
 
-	uint32_t sum     = 0;
-	uint32_t count   = 0;
-
 	for (; count <= bytesCount - 1; ++count) {
-		uint8_t byte = adcBuffer[bufferBasePos + count];
+		byte = adcBuffer[bufferBasePos + count];
 		sum += byte - adcRef;
 	}
 
@@ -513,6 +514,8 @@ void EXTI0_IRQHandler()
  ******************************************************************************/
 void CMP_HandleState(BitAction state)
 {
+	uint16_t count;
+	
 	GPIO_WriteBit(DEBUG_PORT, DEBUG_PIN_CMP, Bit_SET);
 	GPIO_WriteBit(LED_PORT, LED_1, state);
 
@@ -541,7 +544,7 @@ void CMP_HandleState(BitAction state)
 		TIM_DMACmd(ADC_CLK_TIMER, TIM_DMA_CC1, DISABLE);
 
 		// Обрабатываем оставшиеся в буфере данные (меньше половины буфера)
-		uint16_t count = (ADC_DMA_SIZE * 2) - DMA_GetCurrDataCounter(DMA1_Channel6);
+		count = (ADC_DMA_SIZE * 2) - DMA_GetCurrDataCounter(DMA1_Channel6);
 		if (count >= ADC_DMA_SIZE) {
 			count -= ADC_DMA_SIZE;
 			SumADCData(ADC_DMA_SIZE, count);
@@ -655,9 +658,17 @@ void DMA1_Channel6_IRQHandler()
  ******************************************************************************/
 void Report()
 {
-	uint32_t data[] = {Swap(cmpCounter), Swap(adcSum), Swap(adcSumCount)};
+	uint32_t _cmpCounter  = Swap(cmpCounter);
+	uint32_t _adcSum      = Swap(adcSum);
+	uint32_t _adcSumCount = Swap(adcSumCount);
+	
+	uint32_t data[3];
+	data[0] = _cmpCounter;
+	data[1] = _adcSum;
+	data[2] = _adcSumCount;
+	
 	memcpy(dmaTxBuffer, (const uint8_t *)&data, sizeof(data));
-	RestartTxDMA(&dmaTxBuffer, sizeof(data));
+	RestartTxDMA((uint32_t)&dmaTxBuffer, sizeof(data));
 }
 
 /*******************************************************************************
@@ -716,3 +727,23 @@ int main()
 	while (1) {}
 	return 0;
 }
+
+#ifdef  USE_FULL_ASSERT
+/**
+  * @brief  Reports the name of the source file and the source line number
+  *         where the assert_param error has occurred.
+  * @param  file: pointer to the source file name
+  * @param  line: assert_param error line source number
+  * @retval None
+  */
+void assert_failed(uint8_t* file, uint32_t line)
+{ 
+  /* User can add his own implementation to report the file name and line number,
+     ex: printf("Wrong parameters value: file %s on line %drn", file, line) */
+ 
+  /* Infinite loop */
+  while (1)
+  {
+  }
+}
+#endif

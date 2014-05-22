@@ -1,1 +1,11 @@
-UDC/Debug/
+*.plg
+*.crf
+*.o
+*.d
+*.dep
+*.lst
+*.map
+*.lnp
+*.htm
+*.hex
+*.axf
