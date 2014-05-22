@@ -10,10 +10,8 @@
 
 /**
   * Карта подключения:
-  *   PC0 - PC7  GPIO input
+  *   PA0        ADC input
   *   PA1        CMP input
-  *   PA6        TIM3 input (ADC CLK)
-  *   PA8        MCO output
   *   PA9        USART1 Tx
   *   PA10       USART1 Rx
   *   PB*        Debug pins
@@ -29,8 +27,9 @@
 #define CMP_TIMER           TIM4
 #define CMP_TIMER_TIMEOUT   1000 // мс
 
-#define ADC_CLK_TIMER       TIM3
-#define ADC_PORT            GPIOC
+#define ADC_PHY             ADC1
+#define ADC_PORT            GPIOA
+#define ADC_PIN             GPIO_Pin_0
 #define ADC_DMA_SIZE        1024
 
 #define REPORT_TIMER        TIM2
@@ -83,7 +82,7 @@ uint32_t adcSum;
 uint32_t adcSumCount;
 
 BitAction monitoringState = Bit_RESET;
-__IO uint8_t adcBuffer[ADC_DMA_SIZE * 2];
+__IO uint16_t adcBuffer[ADC_DMA_SIZE * 2];
 
 DMA_InitTypeDef dmaTx;
 BitAction dmaTxBusy = Bit_RESET;
@@ -110,11 +109,11 @@ void RCC_Configure()
 	RCC_AHBPeriphClockCmd(RCC_AHBPeriph_DMA1, ENABLE);
 
 	RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOA | RCC_APB2Periph_GPIOB | RCC_APB2Periph_GPIOC, ENABLE);
-	RCC_APB1PeriphClockCmd(RCC_APB1Periph_TIM3  | RCC_APB1Periph_TIM2  | RCC_APB1Periph_TIM4,  ENABLE);
+	RCC_APB1PeriphClockCmd(RCC_APB1Periph_TIM2  | RCC_APB1Periph_TIM4, ENABLE);
 	RCC_APB2PeriphClockCmd(RCC_APB2Periph_USART1, ENABLE);
 
-	// Послать один из clock-сигналов на MCO
-	RCC_MCOConfig(RCC_MCO_HSE);
+	RCC_ADCCLKConfig(RCC_PCLK2_Div6);
+	RCC_APB2PeriphClockCmd(RCC_APB2Periph_ADC1, ENABLE);
 }
 
 /**
@@ -126,22 +125,22 @@ void DMA_Configure()
 
 	// Канал DMA для сбора данных с АЦП
 
-	DMA_InitStructure.DMA_PeripheralBaseAddr = (uint32_t)&ADC_PORT->IDR;
+	DMA_InitStructure.DMA_PeripheralBaseAddr = (uint32_t)&ADC_PHY->DR;
 	DMA_InitStructure.DMA_MemoryBaseAddr     = (uint32_t)&adcBuffer[0];
 	DMA_InitStructure.DMA_DIR                = DMA_DIR_PeripheralSRC;
 	DMA_InitStructure.DMA_BufferSize         = ADC_DMA_SIZE * 2;
 	DMA_InitStructure.DMA_PeripheralInc      = DMA_PeripheralInc_Disable;
 	DMA_InitStructure.DMA_MemoryInc          = DMA_MemoryInc_Enable;
-	DMA_InitStructure.DMA_PeripheralDataSize = DMA_PeripheralDataSize_Byte;
-	DMA_InitStructure.DMA_MemoryDataSize     = DMA_MemoryDataSize_Byte;
+	DMA_InitStructure.DMA_PeripheralDataSize = DMA_PeripheralDataSize_HalfWord;
+	DMA_InitStructure.DMA_MemoryDataSize     = DMA_MemoryDataSize_HalfWord;
 	DMA_InitStructure.DMA_Mode               = DMA_Mode_Circular;
 	DMA_InitStructure.DMA_Priority           = DMA_Priority_VeryHigh;
 	DMA_InitStructure.DMA_M2M                = DMA_M2M_Disable;
-	DMA_Init(DMA1_Channel6, &DMA_InitStructure);
+	DMA_Init(DMA1_Channel1, &DMA_InitStructure);
 
-	DMA_ITConfig(DMA1_Channel6, DMA_IT_TC, ENABLE);
-	DMA_ITConfig(DMA1_Channel6, DMA_IT_HT, ENABLE);
-	NVIC_EnableIRQ(DMA1_Channel6_IRQn);
+	DMA_ITConfig(DMA1_Channel1, DMA_IT_TC, ENABLE);
+	DMA_ITConfig(DMA1_Channel1, DMA_IT_HT, ENABLE);
+	NVIC_EnableIRQ(DMA1_Channel1_IRQn);
 
 	// Канал DMA для отправки буфера данных по USART
 
@@ -168,23 +167,17 @@ void GPIO_Configure()
 {
 	GPIO_InitTypeDef GPIO_InitStructure;
 
-	// Параллельный 8-битный порт ADC_PORT.0-7 для подключения внешнего АЦП
-	GPIO_InitStructure.GPIO_Pin = 0x00FF; // [0:7] пины
-	GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
-	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_IPD;
+	// Входной пин внутреннего АЦП (PA0)
+	GPIO_InitStructure.GPIO_Pin   = ADC_PIN;
+	GPIO_InitStructure.GPIO_Speed = GPIO_Speed_2MHz;
+	GPIO_InitStructure.GPIO_Mode  = GPIO_Mode_AIN;
 	GPIO_Init(ADC_PORT, &GPIO_InitStructure);
 
 	// Пин компаратора (PA1)
 	GPIO_InitStructure.GPIO_Pin = CMP_PIN;
-	GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
+	GPIO_InitStructure.GPIO_Speed = GPIO_Speed_2MHz;
 	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_IPD;
 	GPIO_Init(CMP_PORT, &GPIO_InitStructure);
-
-	// Вход таймера-захвата CLK АЦП (ADC CLK) (PA6)
-	GPIO_InitStructure.GPIO_Pin   = GPIO_Pin_6;
-	GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
-	GPIO_InitStructure.GPIO_Mode  = GPIO_Mode_Out_PP;
-	GPIO_Init(GPIOA, &GPIO_InitStructure);
 
 	// Пин Tx USART1 (PA9)
 	GPIO_InitStructure.GPIO_Pin   = GPIO_Pin_9;
@@ -200,29 +193,46 @@ void GPIO_Configure()
 
 	// DEBUG
 
-	// Выход MCO (PA8)
-	GPIO_InitStructure.GPIO_Pin   = GPIO_Pin_8;
-	GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
-	GPIO_InitStructure.GPIO_Mode  = GPIO_Mode_AF_PP;
-	GPIO_Init(GPIOA, &GPIO_InitStructure);
-
 	// Выходные пины GPIOC.8-9 LED светодиодов
 	GPIO_InitStructure.GPIO_Pin = GPIO_Pin_8 | GPIO_Pin_9;
 	GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
 	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_Out_PP;
 	GPIO_Init(GPIOC, &GPIO_InitStructure);
 
-	// Пин кнопки USER (PA0)
-	GPIO_InitStructure.GPIO_Pin = GPIO_Pin_0;
-	GPIO_InitStructure.GPIO_Speed = GPIO_Speed_2MHz;
-	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_IPD;
-	GPIO_Init(GPIOA, &GPIO_InitStructure);
-
 	// Порт отладочных пинов DEBUG_PORT
 	GPIO_InitStructure.GPIO_Pin = DEBUG_PORT_PINS;
 	GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
 	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_Out_PP;
 	GPIO_Init(DEBUG_PORT, &GPIO_InitStructure);
+}
+
+/**
+  * @brief  Конфигурация внутреннего АЦП
+  */
+void ADC_Configure()
+{
+	ADC_InitTypeDef ADC_InitStructure;
+
+	ADC_StructInit(&ADC_InitStructure);
+	ADC_InitStructure.ADC_Mode = ADC_Mode_Independent;
+	ADC_InitStructure.ADC_ScanConvMode = DISABLE;
+	ADC_InitStructure.ADC_ContinuousConvMode = ENABLE;
+	ADC_InitStructure.ADC_ExternalTrigConv = ADC_ExternalTrigConv_None;
+	ADC_InitStructure.ADC_DataAlign = ADC_DataAlign_Right;
+	ADC_InitStructure.ADC_NbrOfChannel = 1;
+	ADC_Init(ADC_PHY, &ADC_InitStructure);
+
+	ADC_RegularChannelConfig(ADC_PHY, ADC_Channel_0, 1, ADC_SampleTime_1Cycles5);
+
+	ADC_Cmd(ADC_PHY, ENABLE);
+
+	ADC_ResetCalibration(ADC_PHY);
+	while (ADC_GetResetCalibrationStatus(ADC_PHY));
+	ADC_StartCalibration(ADC_PHY);
+	while (ADC_GetCalibrationStatus(ADC_PHY));
+
+	ADC_DMACmd(ADC_PHY, ENABLE);
+	ADC_ITConfig(ADC_PHY, ADC_IT_EOC, ENABLE);
 }
 
 /**
@@ -244,19 +254,6 @@ void EXTI_Configure()
 	EXTI_Init(&EXTI_InitStructure);
 
 	NVIC_EnableIRQ(EXTI1_IRQn);
-
-	// DEBUG
-
-	GPIO_EXTILineConfig(GPIO_PortSourceGPIOA, GPIO_PinSource0);
-	GPIO_EventOutputConfig(GPIO_PortSourceGPIOA, GPIO_PinSource0);
-
-	EXTI_InitStructure.EXTI_Line = EXTI_Line0;
-	EXTI_InitStructure.EXTI_Mode = EXTI_Mode_Interrupt;
-	EXTI_InitStructure.EXTI_Trigger = EXTI_Trigger_Rising;
-	EXTI_InitStructure.EXTI_LineCmd = ENABLE;
-	EXTI_Init(&EXTI_InitStructure);
-
-	NVIC_EnableIRQ(EXTI0_IRQn);
 }
 
 /**
@@ -289,20 +286,6 @@ void USART_Configure()
 void Timers_Configure()
 {
 	TIM_TimeBaseInitTypeDef TIM_TimeBaseStructure;
-	TIM_ICInitTypeDef       TIM_ICInitStructure;
-
-	// Таймер для таймера-захвата CLK АЦП. Тактирует соответствующий канал DMA
-	// Конфигурация режима захвата (Capture Mode)
-	TIM_ICStructInit(&TIM_ICInitStructure);
-	// TIM_ICInitStructure.TIM_Channel     = TIM_Channel_1;
-	// TIM_ICInitStructure.TIM_ICPolarity  = TIM_ICPolarity_Rising;
-	// TIM_ICInitStructure.TIM_ICSelection = TIM_ICSelection_DirectTI;
-	// TIM_ICInitStructure.TIM_ICPrescaler = TIM_ICPSC_DIV1;
-	// TIM_ICInitStructure.TIM_ICFilter    = 0;
-	TIM_ICInit(ADC_CLK_TIMER, &TIM_ICInitStructure);
-
-	// Разрешить срабатывание связанного каанала DMA по прерыванию таймера
-	TIM_DMACmd(ADC_CLK_TIMER, TIM_DMA_CC1, ENABLE);
 
 	// Таймер тайм-аута выброса (CMP timeout)
 
@@ -470,7 +453,10 @@ void SumADCData(uint16_t bufferBasePos, uint16_t bytesCount)
 	static BitAction ADCSumBusy = Bit_RESET;
 	uint32_t sum     = 0;
 	uint32_t count   = 0;
+	uint16_t word;
 	uint8_t  byte;
+
+	ToggleLED2();
 	
 	// Нулевое значение переменной приведёт к бесконечному циклу for
 	if (bytesCount == 0) {
@@ -483,7 +469,8 @@ void SumADCData(uint16_t bufferBasePos, uint16_t bytesCount)
 	ADCSumBusy = Bit_SET;
 
 	for (; count <= bytesCount - 1; ++count) {
-		byte = adcBuffer[bufferBasePos + count];
+		word = adcBuffer[bufferBasePos + count];
+		byte = (uint8_t)((word & 0x0fff) >> 4);
 		sum += byte - adcRef;
 	}
 
@@ -498,16 +485,6 @@ void SumADCData(uint16_t bufferBasePos, uint16_t bytesCount)
 /*******************************************************************************
   * Обработчики прерываний
   ******************************************************************************/
-
-// DEBUG
-// Внешнее прерывание от нажатия кнопки
-void EXTI0_IRQHandler()
-{
-	if (EXTI_GetITStatus(EXTI_Line0) != RESET) {
-		StopMonitoring();
-		EXTI_ClearITPendingBit(EXTI_Line0);
-	}
-}
 
 /**
   * @brief  Логика обработки прерывания от компаратора
@@ -525,11 +502,11 @@ void CMP_HandleState(BitAction state)
 
 	if (state == Bit_SET) {
 		// Сбрасываем канал DMA сбора данных с АЦП
-		DMA_SetCurrDataCounter(DMA1_Channel6, ADC_DMA_SIZE * 2);
+		DMA_SetCurrDataCounter(DMA1_Channel1, ADC_DMA_SIZE * 2);
 
 		// Начинаем сбор данных с АЦП
-		TIM_DMACmd(ADC_CLK_TIMER, TIM_DMA_CC1, ENABLE);
-		DMA_Cmd(DMA1_Channel6, ENABLE);
+		DMA_Cmd(DMA1_Channel1, ENABLE);
+		ADC_SoftwareStartConvCmd(ADC_PHY, ENABLE);
 
 		// Увеличиваем счётчик выбросов / срабатываний компаратора
 		++cmpCounter;
@@ -544,11 +521,11 @@ void CMP_HandleState(BitAction state)
 		TIM_Cmd(CMP_TIMER, DISABLE);
 
 		// Останавливаем сбор данных с АЦП
-		DMA_Cmd(DMA1_Channel6, DISABLE);
-		TIM_DMACmd(ADC_CLK_TIMER, TIM_DMA_CC1, DISABLE);
+		ADC_SoftwareStartConvCmd(ADC_PHY, DISABLE);
+		DMA_Cmd(DMA1_Channel1, DISABLE);
 
 		// Обрабатываем оставшиеся в буфере данные (меньше половины буфера)
-		count = (ADC_DMA_SIZE * 2) - DMA_GetCurrDataCounter(DMA1_Channel6);
+		count = (ADC_DMA_SIZE * 2) - DMA_GetCurrDataCounter(DMA1_Channel1);
 		if (count >= ADC_DMA_SIZE) {
 			count -= ADC_DMA_SIZE;
 			SumADCData(ADC_DMA_SIZE, count);
@@ -570,6 +547,7 @@ void CMP_HandleState(BitAction state)
 void CMP_Handler()
 {
 	BitAction state = GPIO_ReadInputDataBit(CMP_PORT, CMP_PIN);
+	state = Bit_SET;
 	CMP_HandleState(state);
 }
 
@@ -636,25 +614,25 @@ void DMA1_Channel4_IRQHandler()
   * @brief  Прерывание от канала DMA, собирающего данные с внешнего АЦП.
   *         Срабатывает при заполнении каждой из половин буфера данных
   */
-void DMA1_Channel6_IRQHandler()
+void DMA1_Channel1_IRQHandler()
 {
-	// NVIC_DisableIRQ(DMA1_Channel6_IRQn);
+	// NVIC_DisableIRQ(DMA1_Channel1_IRQn);
 	GPIO_WriteBit(DEBUG_PORT, DEBUG_PIN_ADC_DMA, Bit_SET);
 
-	if (DMA_GetITStatus(DMA1_IT_HT6)) {
-		DMA_ClearITPendingBit(DMA1_IT_HT6);
+	if (DMA_GetITStatus(DMA1_IT_HT1)) {
+		DMA_ClearITPendingBit(DMA1_IT_HT1);
 
 		SumADCData(0, ADC_DMA_SIZE);
 	}
 
-	if (DMA_GetITStatus(DMA1_IT_TC6)) {
-		DMA_ClearITPendingBit(DMA1_IT_TC6);
+	if (DMA_GetITStatus(DMA1_IT_TC1)) {
+		DMA_ClearITPendingBit(DMA1_IT_TC1);
 
 		SumADCData(ADC_DMA_SIZE, ADC_DMA_SIZE);
 	}
 
 	GPIO_WriteBit(DEBUG_PORT, DEBUG_PIN_ADC_DMA, Bit_RESET);
-	// NVIC_EnableIRQ(DMA1_Channel6_IRQn);
+	// NVIC_EnableIRQ(DMA1_Channel1_IRQn);
 }
 
 /**
@@ -663,13 +641,15 @@ void DMA1_Channel6_IRQHandler()
 void Report()
 {
 	uint32_t _cmpCounter  = Swap(cmpCounter);
-	uint32_t _adcSum      = Swap(adcSum);
+	uint32_t _adcSum      = Swap((uint32_t)(ADC_PHY->DR & 0xfff));
 	uint32_t _adcSumCount = Swap(adcSumCount);
 	
 	uint32_t data[3];
 	data[0] = _cmpCounter;
 	data[1] = _adcSum;
 	data[2] = _adcSumCount;
+
+	adcSumCount = 0;
 	
 	memcpy(dmaTxBuffer, (const uint8_t *)&data, sizeof(data));
 	RestartTxDMA((uint32_t)&dmaTxBuffer, sizeof(data));
@@ -717,6 +697,7 @@ int main()
 	RCC_Configure();
 	DMA_Configure();
 	GPIO_Configure();
+	ADC_Configure();
 	EXTI_Configure();
 	USART_Configure();
 	Timers_Configure();
