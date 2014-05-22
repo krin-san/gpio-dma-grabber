@@ -292,13 +292,6 @@ void Timers_Configure()
 	TIM_ICInitTypeDef       TIM_ICInitStructure;
 
 	// Таймер для таймера-захвата CLK АЦП. Тактирует соответствующий канал DMA
-
-	// Основная конфигурация таймера
-	TIM_TimeBaseStructInit(&TIM_TimeBaseStructure);
-	TIM_TimeBaseStructure.TIM_Period        = 256;
-	TIM_TimeBaseStructure.TIM_Prescaler     = 0;
-	TIM_TimeBaseInit(ADC_CLK_TIMER, &TIM_TimeBaseStructure);
-
 	// Конфигурация режима захвата (Capture Mode)
 	TIM_ICStructInit(&TIM_ICInitStructure);
 	// TIM_ICInitStructure.TIM_Channel     = TIM_Channel_1;
