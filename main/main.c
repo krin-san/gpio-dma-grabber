@@ -77,23 +77,38 @@ void assert_failed(uint8_t* file, uint32_t line)
   *****************************************************************************/
 
 // Коды команд
-enum CmdInput {
+typedef enum {
 	CmdInputPing     = 'P',
 	CmdInputSetRef   = 'O',
 	CmdInputGetRef   = 'T',
 	CmdInputStart    = 'S',
 	CmdInputStop     = 'V'
-}
-enum CmdOutput {
+} CmdInput;
+typedef enum {
 	CmdOutputACK     = 'Y',
 	CmdOutputError   = 'H',
 	CmdOutputGetRef  = 'T',
 	CmdOutputReport  = 'R'
-}
+} CmdOutput;
 
 // Коды ошибок
-enum ErrorCode {
-	ErrorCodeUnknown = '0'
+typedef enum {
+	ErrorCodeUnknown = '*',
+	ErrorCodeRxFail  = 'r'
+} ErrorCode;
+
+// Проверка кода входящей команды
+#define IS_COMMAND(INPUT) (((INPUT) == CmdInputPing)   || \
+                           ((INPUT) == CmdInputSetRef) || \
+                           ((INPUT) == CmdInputGetRef) || \
+                           ((INPUT) == CmdInputStart)  || \
+                           ((INPUT) == CmdInputStop))
+
+// Проверка кода входных данных
+#define IS_DATA(INPUT) ((((INPUT) >= '0') && ((INPUT) <= '9')) || \
+                        (((INPUT) >= 'A') && ((INPUT) <= 'F')))
+
+
 
 /*******************************************************************************
   * Глобальные переменные
@@ -116,17 +131,18 @@ __IO uint8_t adcBuffer[ADC_DMA_SIZE * 2];
 // Линейный буфер приёма по UART
 #define RX_BUF_SIZE 4
 struct {
-	     bool    waitCmd;
+	     uint8_t waitingCmd;
+	     uint8_t waitNBytes;
 	     uint8_t head;
 	__IO uint8_t buf[RX_BUF_SIZE];
 } rx;
+#define isWaitForCmd (rx.waitingCmd == 0x00)
 
 // Кольцевой буфер передачи по UART
 #define TX_BUF_SIZE 32
 struct {
 	DMA_InitTypeDef dmaCfg;
 	     bool       busy;
-	     bool       waitCmd;
 	     uint8_t    head;
 	     uint8_t    tail;
 	__IO uint8_t    buf[TX_BUF_SIZE];
@@ -139,10 +155,13 @@ struct {
 uint8_t CharToHex(uint8_t c);
 uint8_t HexToChar(uint8_t h);
 
-void StopMonitoring();
+void StartMonitoring(void);
+void StopMonitoring(void);
+void ToggleMonitoring(void);
+
 void CMP_HandleState(BitAction);
-void CMP_Handler();
-void Report();
+void CMP_Handler(void);
+void Report(void);
 
 /*******************************************************************************
   * Конфигурация периферии
@@ -404,6 +423,8 @@ void ToggleLED2()
   */
 void Send()
 {
+	uint8_t size;
+
 	// Ожидаем окончания предыдущей передачи и не пытаемся передать пустоту
 	if (tx.busy == true || tx.head == tx.tail) {
 		return;
@@ -417,8 +438,8 @@ void Send()
 
 	// Можно передать только в линейном порядке, поэтому данные, разбитые концом
 	//   буфера, будут переданы в два захода: (tail -> end) & (start -> head)
-	uint8_t size = (tx.tail < tx.head) ? (tx.head - tx.tail) : (TX_BUF_SIZE - tx.tail);
-	tx.dmaCfg.DMA_MemoryBaseAddr = &(tx.buf[tx.tail]);
+	size = (tx.tail < tx.head) ? (tx.head - tx.tail) : (TX_BUF_SIZE - tx.tail);
+	tx.dmaCfg.DMA_MemoryBaseAddr = (uint32_t)&(tx.buf[tx.tail]);
 	tx.dmaCfg.DMA_BufferSize     = size;
 	DMA_Init(DMA1_Channel4, &(tx.dmaCfg));
 
@@ -437,17 +458,25 @@ void QueueByte(uint8_t byte)
 	}
 }
 
+/**
+  * @brief  .
+  */
 void QueueACK()
 {
 	QueueByte(CmdOutputACK);
 	Send();
 }
 
+/**
+  * @brief  .
+  */
 void QueueData(CmdOutput cmd, uint8_t *data, uint8_t size)
 {
+	uint8_t i;
+
 	QueueByte(cmd);
 
-	for (uint8_t i = 0; i < size; ++i) {
+	for (i = 0; i < size; ++i) {
 		QueueByte(HexToChar(*data >> 4));
 		QueueByte(HexToChar(*data));
 		data++;
@@ -492,6 +521,100 @@ void HALT(ErrorCode code)
 
 	// Заснуть навсегда
 	__WFI();
+}
+
+/**
+  * @brief  Сбрасывает состояние приемника
+  */
+void ResetRx()
+{
+	rx.head = 0;
+	rx.waitingCmd = 0;
+	rx.waitNBytes = 0;
+}
+
+/**
+  * @brief  Обработать новую принятую команду
+  */
+void ProcessCmd(uint8_t cmd)
+{
+	uint8_t data[1];
+
+	switch (cmd) {
+		case CmdInputPing:
+			QueueACK();
+			break;
+
+		case CmdInputSetRef:
+			// Нужно дождаться 8-битного (2xASCII) опорного значения
+			rx.waitingCmd = cmd;
+			rx.waitNBytes = 2;
+			break;
+
+		case CmdInputGetRef:
+			data[0] = adcRef;
+			QueueData(CmdOutputGetRef, (uint8_t *)&data, sizeof(data));
+			break;
+
+		case CmdInputStart:
+			StartMonitoring();
+			break;
+
+		case CmdInputStop:
+			StopMonitoring();
+			break;
+
+		/*
+		case CmdOutputReport: // DEBUG
+			Report();
+			break;
+
+		case 'G': // DEBUG
+			cmd = (uint8_t)GPIO_ReadInputData(GPIOC);
+			USART_SendData(USART_PHY, cmd);
+			break;
+		*/
+			
+		default:
+			ResetRx();
+			QueueError(ErrorCodeRxFail);
+			break;
+	}
+}
+
+/**
+  * @brief  Обработать команду, ожидающую дополнительных данных
+  */
+void ProcessWaitingCmd()
+{
+	// uint8_t i;
+	uint8_t data;
+
+	switch (rx.waitingCmd) {
+		case CmdInputSetRef:
+			// Расшифруем ASCII-символы в данные
+			data =  CharToHex(rx.buf[0]) << 4;
+			data |= CharToHex(rx.buf[1]);
+			adcRef = data;
+			ResetRx();
+			QueueACK();
+			break;
+
+		/*
+		case CmdInput:
+			// Расшифруем ASCII-символы в данные
+			for (i = 0; i < rx.head; ++i) {
+				data = (CharToHex(rx.buf[i]) & 0x0F);
+				data = data | ((CharToHex(rx.buf[i]) & 0xF0) << 4);
+			}
+			break;
+		*/
+
+		default:
+			ResetRx();
+			QueueError(ErrorCodeRxFail);
+			break;
+	}
 }
 
 /**
@@ -566,6 +689,7 @@ void StartMonitoring()
 		ToggleLED2();
 
 		monitoringActive = true;
+		QueueACK();
 
 		// Сбрасываем счётчики
 		cmpCounter = 0;
@@ -603,6 +727,7 @@ void StopMonitoring()
 		CMP_HandleState(Bit_RESET);
 
 		monitoringActive = false;
+		QueueACK();
 	}
 	__enable_irq();
 }
@@ -723,7 +848,7 @@ void CMP_HandleState(BitAction state)
   */
 void CMP_Handler()
 {
-	BitAction state = GPIO_ReadInputDataBit(CMP_PORT, CMP_PIN);
+	BitAction state = (BitAction)GPIO_ReadInputDataBit(CMP_PORT, CMP_PIN);
 	CMP_HandleState(state);
 }
 
@@ -748,41 +873,30 @@ void USART1_IRQHandler()
 	if (USART_GetITStatus(USART_PHY, USART_IT_RXNE)) {
 		uint8_t data = USART_ReceiveData(USART_PHY);
 
-		switch (data) {
-			case CmdInputPing:
-				QueueACK();
-				break;
-
-			case CmdInputSetRef:
-				QueueError(ErrorCodeUnknown);
-				break;
-
-			case CmdInputGetRef:
-				QueueError(ErrorCodeUnknown);
-				break;
-
-			case CmdInputStart:
-				StartMonitoring();
-				QueueACK();
-				break;
-
-			case CmdInputStop:
-				StopMonitoring();
-				QueueACK();
-				break;
-
-			case CmdOutputReport: // DEBUG
-				Report();
-				break;
-
-			case 'G': // DEBUG
-				data = (uint8_t)GPIO_ReadInputData(GPIOC);
-				USART_SendData(USART_PHY, data);
-				break;
+		if (isWaitForCmd) {
+			// Проверим корректность приёма
+			if (IS_COMMAND(data) == true) {
+				ProcessCmd(data);
+			}
+			else {
+				ResetRx();
+				QueueError(ErrorCodeRxFail);
+			}
+		}
+		else {
+			// Проверим корректность приёма
+			if (IS_DATA(data)) {
+				rx.buf[rx.head++] = data;
 				
-			default:
-				QueueError(ErrorCodeUnknown);
-				break;
+				--(rx.waitNBytes);
+				if (rx.waitNBytes == 0) {
+					ProcessWaitingCmd();
+				}
+			}
+			else {
+				ResetRx();
+				QueueError(ErrorCodeRxFail);
+			}
 		}
 
 		USART_ClearITPendingBit(USART_PHY, USART_IT_RXNE);
@@ -804,8 +918,14 @@ void DMA1_Channel4_IRQHandler()
 			// Не ломаем цикличность буфера
 			tx.tail = 0;
 		}
-
+		
 		tx.busy = false;
+		
+		// Передадим оставшийся кусок массива данных
+		if (tx.head > tx.tail) {
+			Send();
+		}
+
 		DMA_ClearITPendingBit(DMA1_IT_TC4);
 	}
 }
@@ -849,8 +969,7 @@ void Report()
 	data[1] = _adcSum;
 	data[2] = _adcSumCount;
 	
-	uint8_t *data8  = (uint8_t &)&data;
-	QueueData(CmdOutputReport, data8, sizeof(data));
+	QueueData(CmdOutputReport, (uint8_t *)&data, sizeof(data));
 }
 
 /**
@@ -892,13 +1011,20 @@ void TIM4_IRQHandler()
 int main()
 {
 	__disable_irq();
+	
 	RCC_Configure();
 	DMA_Configure();
 	GPIO_Configure();
 	EXTI_Configure();
 	USART_Configure();
 	Timers_Configure();
-	ToggleLED1(); // Устройство готово
+	
+	// Первым байтом ожидаем команду
+	rx.waitingCmd = 0;
+	
+	// Устройство готово
+	ToggleLED1();
+
 	__enable_irq();
 
 	// Бесконечный цикл ожидания прерываний
