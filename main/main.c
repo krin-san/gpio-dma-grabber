@@ -552,9 +552,9 @@ uint8_t HexToChar(uint8_t h)
 
 
 
-/**
+/*******************************************************************************
   * Мониторинг
-  */
+  *****************************************************************************/
 
 /**
   * @brief  Старт мониторинга
@@ -627,7 +627,6 @@ void ToggleMonitoring()
   */
 void SumADCData(uint16_t bufferBasePos, uint16_t bytesCount)
 {
-	static BitAction ADCSumBusy = Bit_RESET;
 	uint32_t sum     = 0;
 	uint32_t count   = 0;
 	uint8_t  byte;
@@ -636,11 +635,6 @@ void SumADCData(uint16_t bufferBasePos, uint16_t bytesCount)
 	if (bytesCount == 0) {
 		return;
 	}
-
-	if (ADCSumBusy == Bit_SET) {
-		HALT('S');
-	}
-	ADCSumBusy = Bit_SET;
 
 	for (; count <= bytesCount - 1; ++count) {
 		byte = adcBuffer[bufferBasePos + count];
@@ -651,8 +645,6 @@ void SumADCData(uint16_t bufferBasePos, uint16_t bytesCount)
 	adcSum += sum;
 	adcSumCount += count;
 	__enable_irq();
-
-	ADCSumBusy = Bit_RESET;
 }
 
 
