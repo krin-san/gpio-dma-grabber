@@ -308,7 +308,7 @@ void EXTI_Configure()
 	EXTI_InitStructure.EXTI_LineCmd = ENABLE;
 	EXTI_Init(&EXTI_InitStructure);
 
-	NVIC_EnableIRQ(EXTI1_IRQn);
+	// NVIC_EnableIRQ(EXTI1_IRQn);
 
 	// DEBUG
 
@@ -703,6 +703,8 @@ void StartMonitoring()
 
 		// Определяем начальное состояние по значению на выходе компаратора
 		CMP_Handler();
+		// Разрешаем прерывание от компаратора
+		NVIC_EnableIRQ(EXTI1_IRQn);
 
 		// Запускаем таймер отчётов
 		TIM_SetCounter(REPORT_TIMER, 0);
@@ -723,6 +725,8 @@ void StopMonitoring()
 		// Остановка таймера отчётов
 		TIM_Cmd(REPORT_TIMER, DISABLE);
 
+		// Запрещаем прерывание от компаратора
+		NVIC_DisableIRQ(EXTI1_IRQn);
 		// Останавливаем сбор данных с АЦП
 		CMP_HandleState(Bit_RESET);
 
@@ -797,7 +801,15 @@ void EXTI0_IRQHandler()
   */
 void CMP_HandleState(BitAction state)
 {
+	static BitAction lastState = Bit_RESET;
 	uint16_t count;
+
+	// Не позволим функции дважды сработать с тем же значением
+	if (lastState == state) {
+		return;
+	}
+
+	lastState = state;
 	
 	GPIO_WriteBit(DEBUG_PORT, DEBUG_PIN_CMP, Bit_SET);
 	GPIO_WriteBit(LED_PORT, LED_1, state);
