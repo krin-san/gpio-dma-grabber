@@ -165,7 +165,7 @@
             <Capability>1</Capability>
             <DriverSelection>4103</DriverSelection>
           </Flash1>
-          <bUseTDR>1</bUseTDR>
+          <bUseTDR>0</bUseTDR>
           <Flash2>STLink\ST-LINKIII-KEIL_SWO.dll</Flash2>
           <Flash3>"" ()</Flash3>
           <Flash4></Flash4>
@@ -536,11 +536,6 @@
               <FileName>main.c</FileName>
               <FileType>1</FileType>
               <FilePath>.\main\main.c</FilePath>
-            </File>
-            <File>
-              <FileName>Ek_FFT128Real_32b.s</FileName>
-              <FileType>2</FileType>
-              <FilePath>.\main\Ek_FFT128Real_32b.s</FilePath>
             </File>
           </Files>
         </Group>
