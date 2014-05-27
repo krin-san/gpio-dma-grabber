@@ -851,7 +851,7 @@ void CMP_HandleState(BitAction state)
 void CMP_Handler()
 {
 	BitAction state = (BitAction)GPIO_ReadInputDataBit(CMP_PORT, CMP_PIN);
-	state = Bit_SET;
+	// state = Bit_SET;
 	CMP_HandleState(state);
 }
 
@@ -962,15 +962,18 @@ void DMA1_Channel1_IRQHandler()
 void Report()
 {
 	uint32_t _cmpCounter  = Swap(cmpCounter);
-	uint32_t _adcSum      = Swap((uint32_t)(ADC_PHY->DR & 0xfff));
+	uint32_t _adcSum      = Swap(adcSum);
 	uint32_t _adcSumCount = Swap(adcSumCount);
 	
 	uint32_t data[3];
+
+	// _adcSum = (uint32_t)(ADC_PHY->DR & 0xfff);
+	
 	data[0] = _cmpCounter;
 	data[1] = _adcSum;
 	data[2] = _adcSumCount;
 
-	adcSumCount = 0;
+	// adcSumCount = 0;
 	
 	QueueData(CmdOutputReport, (uint8_t *)&data, sizeof(data));
 }
