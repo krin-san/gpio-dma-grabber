@@ -139,7 +139,7 @@ struct {
 #define isWaitForCmd (rx.waitingCmd == 0x00)
 
 // Кольцевой буфер передачи по UART
-#define TX_BUF_SIZE 32
+#define TX_BUF_SIZE 64
 struct {
 	DMA_InitTypeDef dmaCfg;
 	     bool       busy;
@@ -931,14 +931,12 @@ void DMA1_Channel4_IRQHandler()
 			tx.tail = 0;
 		}
 		
+		DMA_ClearITPendingBit(DMA1_IT_TC4);
+		
 		tx.busy = false;
 		
 		// Передадим оставшийся кусок массива данных
-		if (tx.head > tx.tail) {
-			Send();
-		}
-
-		DMA_ClearITPendingBit(DMA1_IT_TC4);
+		Send();
 	}
 }
 
