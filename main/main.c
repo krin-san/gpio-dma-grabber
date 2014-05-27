@@ -138,7 +138,7 @@ struct {
 #define isWaitForCmd (rx.waitingCmd == 0x00)
 
 // Кольцевой буфер передачи по UART
-#define TX_BUF_SIZE 32
+#define TX_BUF_SIZE 64
 struct {
 	DMA_InitTypeDef dmaCfg;
 	     bool       busy;
@@ -318,7 +318,20 @@ void EXTI_Configure()
 	EXTI_InitStructure.EXTI_LineCmd = ENABLE;
 	EXTI_Init(&EXTI_InitStructure);
 
-	NVIC_EnableIRQ(EXTI1_IRQn);
+	// NVIC_EnableIRQ(EXTI1_IRQn);
+
+	// DEBUG
+
+	GPIO_EXTILineConfig(GPIO_PortSourceGPIOA, GPIO_PinSource0);
+	GPIO_EventOutputConfig(GPIO_PortSourceGPIOA, GPIO_PinSource0);
+
+	EXTI_InitStructure.EXTI_Line = EXTI_Line0;
+	EXTI_InitStructure.EXTI_Mode = EXTI_Mode_Interrupt;
+	EXTI_InitStructure.EXTI_Trigger = EXTI_Trigger_Rising;
+	EXTI_InitStructure.EXTI_LineCmd = ENABLE;
+	EXTI_Init(&EXTI_InitStructure);
+
+	NVIC_EnableIRQ(EXTI0_IRQn);
 }
 
 /**
@@ -686,6 +699,8 @@ void StartMonitoring()
 
 		// Определяем начальное состояние по значению на выходе компаратора
 		CMP_Handler();
+		// Разрешаем прерывание от компаратора
+		NVIC_EnableIRQ(EXTI1_IRQn);
 
 		// Запускаем таймер отчётов
 		TIM_SetCounter(REPORT_TIMER, 0);
@@ -706,6 +721,8 @@ void StopMonitoring()
 		// Остановка таймера отчётов
 		TIM_Cmd(REPORT_TIMER, DISABLE);
 
+		// Запрещаем прерывание от компаратора
+		NVIC_DisableIRQ(EXTI1_IRQn);
 		// Останавливаем сбор данных с АЦП
 		CMP_HandleState(Bit_RESET);
 
@@ -774,7 +791,15 @@ void SumADCData(uint16_t bufferBasePos, uint16_t bytesCount)
   */
 void CMP_HandleState(BitAction state)
 {
+	static BitAction lastState = Bit_RESET;
 	uint16_t count;
+
+	// Не позволим функции дважды сработать с тем же значением
+	if (lastState == state) {
+		return;
+	}
+
+	lastState = state;
 	
 	GPIO_WriteBit(DEBUG_PORT, DEBUG_PIN_CMP, Bit_SET);
 	GPIO_WriteBit(LED_PORT, LED_1, state);
@@ -897,14 +922,12 @@ void DMA1_Channel4_IRQHandler()
 			tx.tail = 0;
 		}
 		
+		DMA_ClearITPendingBit(DMA1_IT_TC4);
+		
 		tx.busy = false;
 		
 		// Передадим оставшийся кусок массива данных
-		if (tx.head > tx.tail) {
-			Send();
-		}
-
-		DMA_ClearITPendingBit(DMA1_IT_TC4);
+		Send();
 	}
 }
 
@@ -1008,7 +1031,8 @@ int main()
 
 	__enable_irq();
 
-	// Бесконечный цикл ожидания прерываний
-	while (1) {}
-	return 0;
+	while (1) {
+		// Вводим в экономный режим (ожидаем прерываний от периферии)
+		__WFI();
+	}
 }
