@@ -24,6 +24,7 @@
   *****************************************************************************/
 
 #define CMP_PORT            GPIOA
+#define CMP_REF_PIN         GPIO_Pin_4
 #define CMP_PIN             GPIO_Pin_1
 
 #define CMP_TIMER           TIM4
@@ -115,7 +116,8 @@ typedef enum {
   *****************************************************************************/
 
 // Опорное значение. Задаётся посредством команды Configure (C)
-uint8_t  adcRef;
+// 0xFF = 2.96 В
+uint8_t  adcRef = 0;
 
 // Счетчик превышений АЭ
 uint32_t cmpCounter;
@@ -177,6 +179,7 @@ void RCC_Configure()
 	RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOA | RCC_APB2Periph_GPIOB | RCC_APB2Periph_GPIOC, ENABLE);
 	RCC_APB1PeriphClockCmd(RCC_APB1Periph_TIM3  | RCC_APB1Periph_TIM2  | RCC_APB1Periph_TIM4,  ENABLE);
 	RCC_APB2PeriphClockCmd(RCC_APB2Periph_USART1, ENABLE);
+	RCC_APB1PeriphClockCmd(RCC_APB1Periph_DAC,    ENABLE);
 
 	// Послать один из clock-сигналов на MCO
 	RCC_MCOConfig(RCC_MCO_HSE);
@@ -245,6 +248,12 @@ void GPIO_Configure()
 	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_IPD;
 	GPIO_Init(CMP_PORT, &GPIO_InitStructure);
 
+	// Пин для передачи опорного значения компаратору (PA4)
+	GPIO_InitStructure.GPIO_Pin = CMP_REF_PIN;
+	GPIO_InitStructure.GPIO_Speed = GPIO_Speed_2MHz;
+	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AIN;
+	GPIO_Init(CMP_PORT, &GPIO_InitStructure);
+
 	// Вход таймера-захвата CLK АЦП (ADC CLK) (PA6)
 	GPIO_InitStructure.GPIO_Pin   = GPIO_Pin_6;
 	GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
@@ -288,6 +297,22 @@ void GPIO_Configure()
 	GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
 	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_Out_PP;
 	GPIO_Init(DEBUG_PORT, &GPIO_InitStructure);
+}
+
+/**
+  * @brief  Конфигурация внутреннего ЦАП
+  */
+void DAC_Configure()
+{
+	DAC_InitTypeDef DAC_InitStructure;
+
+	DAC_DeInit();
+
+	DAC_StructInit(&DAC_InitStructure);
+	DAC_InitStructure.DAC_Trigger        = DAC_Trigger_None;
+	DAC_InitStructure.DAC_WaveGeneration = DAC_WaveGeneration_None;
+	DAC_InitStructure.DAC_OutputBuffer   = DAC_OutputBuffer_Disable;
+	DAC_Init(DAC_Channel_1, &DAC_InitStructure);
 }
 
 /**
@@ -398,6 +423,14 @@ void ToggleLED2()
 	GPIO_WriteBit(LED_PORT, LED_2, state);
 }
 
+/**
+  * @brief  Обновить выходной уровень напряжения ЦАП в соответствии с adcRef
+  */
+void TriggerDAC()
+{
+	// 0xFF = 2.96V
+	DAC_SetChannel1Data(DAC_Align_8b_R, (uint16_t)adcRef);
+}
 
 
 /*******************************************************************************
@@ -583,6 +616,7 @@ void ProcessWaitingCmd()
 			data =  CharToHex(rx.buf[0]) << 4;
 			data |= CharToHex(rx.buf[1]);
 			adcRef = data;
+			TriggerDAC();
 			ResetRx();
 			QueueACK();
 			break;
@@ -1018,10 +1052,14 @@ int main()
 	EXTI_Configure();
 	USART_Configure();
 	Timers_Configure();
+	DAC_Configure();
 	
 	// Первым байтом ожидаем команду
 	rx.waitingCmd = 0;
-	
+
+	DAC_Cmd(DAC_Channel_1, ENABLE);
+	TriggerDAC();
+
 	// Устройство готово
 	ToggleLED1();
 
