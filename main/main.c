@@ -1,5 +1,5 @@
 /**
-  * @title  GPIO DMA Grabber
+  * @title  Acoustic Emission GPIO-DMA Grabber
   * @author Krin-San
   * @date   10 Feb 2014
   * @brief  Программа обработки данных измерительного канала АЭ
@@ -10,7 +10,7 @@
 
 /**
   * Карта подключения:
-  *   PC0 - PC7  GPIO input
+  *   PC0 - PC7  ADC input
   *   PA1        CMP input
   *   PA6        TIM3 input (ADC CLK)
   *   PA8        MCO output
@@ -756,6 +756,7 @@ void ToggleMonitoring()
   */
 void SumADCData(uint16_t bufferBasePos, uint16_t bytesCount)
 {
+	uint32_t i       = 0;
 	uint32_t sum     = 0;
 	uint32_t count   = 0;
 	uint8_t  byte;
@@ -765,9 +766,14 @@ void SumADCData(uint16_t bufferBasePos, uint16_t bytesCount)
 		return;
 	}
 
-	for (; count <= bytesCount - 1; ++count) {
-		byte = adcBuffer[bufferBasePos + count];
-		sum += byte - adcRef;
+	for (; i <= bytesCount - 1; ++i) {
+		byte = adcBuffer[bufferBasePos + i];
+		if (byte > adcRef) {
+			sum += byte - adcRef;
+			++count;
+		}
+		// DEBUG Speed test
+		//else ++count;
 	}
 
 	__disable_irq();
@@ -974,12 +980,19 @@ void Report()
 	uint32_t _adcSum      = Swap(adcSum);
 	uint32_t _adcSumCount = Swap(adcSumCount);
 	
-	uint32_t data[3];
-	data[0] = _cmpCounter;
-	data[1] = _adcSum;
-	data[2] = _adcSumCount;
-	
+	uint8_t data[1+4*3];
+	uint32_t *data32 = (uint32_t *)&(data[1]);
+	data[0] = ADC_PORT->IDR;   // Текущее значение АЦП
+	*data32 = _cmpCounter;     // Количество срабатываний компаратора
+	data32++;
+	*data32 = _adcSum;         // Сумма собранных с АЦП значений
+	data32++;
+	*data32 = _adcSumCount;    // Количество собранных с АЦП значений
+
 	QueueData(CmdOutputReport, (uint8_t *)&data, sizeof(data));
+
+	// DEBUG Speed test
+	//adcSumCount = 0;
 }
 
 /**
