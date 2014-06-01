@@ -469,6 +469,10 @@ void Send()
 	DMA_Cmd(DMA1_Channel4, ENABLE);
 }
 
+/**
+  * @brief  Добавляет в массив отправки очередной байт данных
+  * @param  byte Байт данных для добавление в очередь отправки
+  */
 void QueueByte(uint8_t byte)
 {
 	tx.buf[tx.head] = byte;
@@ -481,7 +485,7 @@ void QueueByte(uint8_t byte)
 }
 
 /**
-  * @brief  .
+  * @brief  Отправляет сигнал ACK
   */
 void QueueACK()
 {
@@ -490,7 +494,11 @@ void QueueACK()
 }
 
 /**
-  * @brief  .
+  * @brief  Подготавливает к отправке команду с массивом данных и
+  *         инициализирует отправку
+  * @param  cmd  Код команды в виде ASCII-символа
+  * @param  data Указатель на массив байт данных
+  * @param  size Размер массива данных
   */
 void QueueData(CmdOutput cmd, uint8_t *data, uint8_t size)
 {
@@ -509,6 +517,7 @@ void QueueData(CmdOutput cmd, uint8_t *data, uint8_t size)
 
 /**
   * @brief  Сообщает об ошибке с заданным кодом
+  * @param  code Код ошибки в виде ASCII-символа
   */
 void QueueError(ErrorCode code)
 {
@@ -520,6 +529,7 @@ void QueueError(ErrorCode code)
 /**
   * @brief  Сообщает о критической ошибке с заданным кодом
   *         После этого ход выполнения программы прервётся до сброса
+  * @param  code Код ошибки в виде ASCII-символа
   */
 void HALT(ErrorCode code)
 {
@@ -557,6 +567,7 @@ void ResetRx()
 
 /**
   * @brief  Обработать новую принятую команду
+  * @param  cmd Код команды в виде ASCII-символа
   */
 void ProcessCmd(uint8_t cmd)
 {
@@ -662,9 +673,9 @@ uint32_t Swap(uint32_t value)
 }
 
 /**
-  * @brief  .
-  * @param  .
-  * @retval .
+  * @brief  Преобразует ASCII-символ в шестнадцатеричное число
+  * @param  h ASCII-символ для преобразования
+  * @retval Преобразованный в шестнадцатеричное число ASCII-символ
   */
 uint8_t CharToHex(uint8_t c)
 {
@@ -683,9 +694,9 @@ uint8_t CharToHex(uint8_t c)
 }
 
 /**
-  * @brief  .
-  * @param  .
-  * @retval .
+  * @brief  Преобразует младшую тетраду шестнадцатеричного числа в ASCII-символ
+  * @param  h Число для преобразования
+  * @retval Преобразованная в ASCII-символ младшая тетрада числа
   */
 uint8_t HexToChar(uint8_t h)
 {
