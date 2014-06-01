@@ -1,9 +1,9 @@
 /**
   ******************************************************************************
-  * @file    RTC/Calendar/stm32f10x_conf.h 
+  * @file    Demo/inc/stm32f10x_conf.h 
   * @author  MCD Application Team
-  * @version V3.4.0
-  * @date    10/15/2010
+  * @version V1.0.0
+  * @date    09/13/2010
   * @brief   Library configuration file.
   ******************************************************************************
   * @copy
@@ -27,9 +27,8 @@
 /* #include "stm32f10x_adc.h" */
 /* #include "stm32f10x_bkp.h" */
 /* #include "stm32f10x_can.h" */
-/* #include "stm32f10x_cec.h" */
 #include "stm32f10x_crc.h"
-/* #include "stm32f10x_dac.h" */
+#include "stm32f10x_dac.h"
 /* #include "stm32f10x_dbgmcu.h" */
 #include "stm32f10x_dma.h"
 #include "stm32f10x_exti.h"
@@ -40,20 +39,19 @@
 /* #include "stm32f10x_iwdg.h" */
 /* #include "stm32f10x_pwr.h" */
 #include "stm32f10x_rcc.h"
-/* #include "stm32f10x_rtc.h"  */
+/* #include "stm32f10x_rtc.h" */
 /* #include "stm32f10x_sdio.h" */
 /* #include "stm32f10x_spi.h" */
 #include "stm32f10x_tim.h"
 #include "stm32f10x_usart.h"
 /* #include "stm32f10x_wwdg.h" */
-/* #include "misc.h" */ /* High level functions for NVIC and SysTick (add-on to CMSIS functions) */
-
+#include "misc.h" /* High level functions for NVIC and SysTick (add-on to CMSIS functions) */
 
 /* Exported types ------------------------------------------------------------*/
 /* Exported constants --------------------------------------------------------*/
 /* Uncomment the line below to expanse the "assert_param" macro in the 
    Standard Peripheral Library drivers code */
-/* #define USE_FULL_ASSERT    1 */
+#define USE_FULL_ASSERT    1
 
 /* Exported macro ------------------------------------------------------------*/
 #ifdef  USE_FULL_ASSERT
