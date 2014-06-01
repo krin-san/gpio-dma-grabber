@@ -12,6 +12,7 @@
   * Карта подключения:
   *   PC0 - PC7  ADC input
   *   PA1        CMP input
+  *   PA4        CMP reference voltage
   *   PA6        TIM3 input (ADC CLK)
   *   PA8        MCO output
   *   PA9        USART1 Tx
@@ -28,14 +29,14 @@
 #define CMP_PIN             GPIO_Pin_1
 
 #define CMP_TIMER           TIM4
-#define CMP_TIMER_TIMEOUT   1000 // мс
+#define CMP_TIMER_TIMEOUT   200 // мс
 
 #define ADC_CLK_TIMER       TIM3
 #define ADC_PORT            GPIOC
 #define ADC_DMA_SIZE        1024
 
 #define REPORT_TIMER        TIM2
-#define REPORT_TIMEOUT      1000 // мс
+#define REPORT_TIMEOUT      200 // мс
 
 #define USART_PHY           USART1
 #define USART_BAUD_RATE     115200
