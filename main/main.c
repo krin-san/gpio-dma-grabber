@@ -309,19 +309,6 @@ void EXTI_Configure()
 	EXTI_Init(&EXTI_InitStructure);
 
 	// NVIC_EnableIRQ(EXTI1_IRQn);
-
-	// DEBUG
-
-	GPIO_EXTILineConfig(GPIO_PortSourceGPIOA, GPIO_PinSource0);
-	GPIO_EventOutputConfig(GPIO_PortSourceGPIOA, GPIO_PinSource0);
-
-	EXTI_InitStructure.EXTI_Line = EXTI_Line0;
-	EXTI_InitStructure.EXTI_Mode = EXTI_Mode_Interrupt;
-	EXTI_InitStructure.EXTI_Trigger = EXTI_Trigger_Rising;
-	EXTI_InitStructure.EXTI_LineCmd = ENABLE;
-	EXTI_Init(&EXTI_InitStructure);
-
-	NVIC_EnableIRQ(EXTI0_IRQn);
 }
 
 /**
@@ -787,16 +774,6 @@ void SumADCData(uint16_t bufferBasePos, uint16_t bytesCount)
 /*******************************************************************************
   * Обработчики прерываний
   *****************************************************************************/
-
-// DEBUG
-// Внешнее прерывание от нажатия кнопки
-void EXTI0_IRQHandler()
-{
-	if (EXTI_GetITStatus(EXTI_Line0) != RESET) {
-		StopMonitoring();
-		EXTI_ClearITPendingBit(EXTI_Line0);
-	}
-}
 
 /**
   * @brief  Логика обработки прерывания от компаратора
