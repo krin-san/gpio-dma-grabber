@@ -1,5 +1,5 @@
 /**
-  * @title  GPIO DMA Grabber
+  * @title  Acoustic Emission GPIO-DMA Grabber
   * @author Krin-San
   * @date   10 Feb 2014
   * @brief  Программа обработки данных измерительного канала АЭ
@@ -12,6 +12,9 @@
   * Карта подключения:
   *   PA0        ADC input
   *   PA1        CMP input
+  *   PA4        CMP reference voltage
+  *   PA6        TIM3 input (ADC CLK)
+  *   PA8        MCO output
   *   PA9        USART1 Tx
   *   PA10       USART1 Rx
   *   PB*        Debug pins
@@ -22,10 +25,11 @@
   *****************************************************************************/
 
 #define CMP_PORT            GPIOA
+#define CMP_REF_PIN         GPIO_Pin_4
 #define CMP_PIN             GPIO_Pin_1
 
 #define CMP_TIMER           TIM4
-#define CMP_TIMER_TIMEOUT   1000 // мс
+#define CMP_TIMER_TIMEOUT   200 // мс
 
 #define ADC_PHY             ADC1
 #define ADC_PORT            GPIOA
@@ -33,7 +37,7 @@
 #define ADC_DMA_SIZE        1024
 
 #define REPORT_TIMER        TIM2
-#define REPORT_TIMEOUT      1000 // мс
+#define REPORT_TIMEOUT      200 // мс
 
 #define USART_PHY           USART1
 #define USART_BAUD_RATE     115200
@@ -114,7 +118,8 @@ typedef enum {
   *****************************************************************************/
 
 // Опорное значение. Задаётся посредством команды Configure (C)
-uint8_t  adcRef;
+// 0xFF = 2.96 В
+uint8_t  adcRef = 0;
 
 // Счетчик превышений АЭ
 uint32_t cmpCounter;
@@ -176,6 +181,7 @@ void RCC_Configure()
 	RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOA | RCC_APB2Periph_GPIOB | RCC_APB2Periph_GPIOC, ENABLE);
 	RCC_APB1PeriphClockCmd(RCC_APB1Periph_TIM2  | RCC_APB1Periph_TIM4, ENABLE);
 	RCC_APB2PeriphClockCmd(RCC_APB2Periph_USART1, ENABLE);
+	RCC_APB1PeriphClockCmd(RCC_APB1Periph_DAC,    ENABLE);
 
 	RCC_ADCCLKConfig(RCC_PCLK2_Div6);
 	RCC_APB2PeriphClockCmd(RCC_APB2Periph_ADC1, ENABLE);
@@ -244,6 +250,12 @@ void GPIO_Configure()
 	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_IPD;
 	GPIO_Init(CMP_PORT, &GPIO_InitStructure);
 
+	// Пин для передачи опорного значения компаратору (PA4)
+	GPIO_InitStructure.GPIO_Pin = CMP_REF_PIN;
+	GPIO_InitStructure.GPIO_Speed = GPIO_Speed_2MHz;
+	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AIN;
+	GPIO_Init(CMP_PORT, &GPIO_InitStructure);
+
 	// Пин Tx USART1 (PA9)
 	GPIO_InitStructure.GPIO_Pin   = GPIO_Pin_9;
 	GPIO_InitStructure.GPIO_Speed = GPIO_Speed_2MHz;
@@ -301,6 +313,22 @@ void ADC_Configure()
 }
 
 /**
+  * @brief  Конфигурация внутреннего ЦАП
+  */
+void DAC_Configure()
+{
+	DAC_InitTypeDef DAC_InitStructure;
+
+	DAC_DeInit();
+
+	DAC_StructInit(&DAC_InitStructure);
+	DAC_InitStructure.DAC_Trigger        = DAC_Trigger_None;
+	DAC_InitStructure.DAC_WaveGeneration = DAC_WaveGeneration_None;
+	DAC_InitStructure.DAC_OutputBuffer   = DAC_OutputBuffer_Disable;
+	DAC_Init(DAC_Channel_1, &DAC_InitStructure);
+}
+
+/**
   * @brief  Конфигурация внешних прерываний
   */
 void EXTI_Configure()
@@ -319,19 +347,6 @@ void EXTI_Configure()
 	EXTI_Init(&EXTI_InitStructure);
 
 	// NVIC_EnableIRQ(EXTI1_IRQn);
-
-	// DEBUG
-
-	GPIO_EXTILineConfig(GPIO_PortSourceGPIOA, GPIO_PinSource0);
-	GPIO_EventOutputConfig(GPIO_PortSourceGPIOA, GPIO_PinSource0);
-
-	EXTI_InitStructure.EXTI_Line = EXTI_Line0;
-	EXTI_InitStructure.EXTI_Mode = EXTI_Mode_Interrupt;
-	EXTI_InitStructure.EXTI_Trigger = EXTI_Trigger_Rising;
-	EXTI_InitStructure.EXTI_LineCmd = ENABLE;
-	EXTI_Init(&EXTI_InitStructure);
-
-	NVIC_EnableIRQ(EXTI0_IRQn);
 }
 
 /**
@@ -407,6 +422,14 @@ void ToggleLED2()
 	GPIO_WriteBit(LED_PORT, LED_2, state);
 }
 
+/**
+  * @brief  Обновить выходной уровень напряжения ЦАП в соответствии с adcRef
+  */
+void TriggerDAC()
+{
+	// 0xFF = 2.96V
+	DAC_SetChannel1Data(DAC_Align_8b_R, (uint16_t)adcRef);
+}
 
 
 /*******************************************************************************
@@ -592,6 +615,7 @@ void ProcessWaitingCmd()
 			data =  CharToHex(rx.buf[0]) << 4;
 			data |= CharToHex(rx.buf[1]);
 			adcRef = data;
+			TriggerDAC();
 			ResetRx();
 			QueueACK();
 			break;
@@ -752,22 +776,26 @@ void ToggleMonitoring()
   */
 void SumADCData(uint16_t bufferBasePos, uint16_t bytesCount)
 {
+	uint32_t i       = 0;
 	uint32_t sum     = 0;
 	uint32_t count   = 0;
 	uint16_t word;
 	uint8_t  byte;
 
-	ToggleLED2();
-	
 	// Нулевое значение переменной приведёт к бесконечному циклу for
 	if (bytesCount == 0) {
 		return;
 	}
 
-	for (; count <= bytesCount - 1; ++count) {
-		word = adcBuffer[bufferBasePos + count];
+	for (; i <= bytesCount - 1; ++i) {
+		word = adcBuffer[bufferBasePos + i];
 		byte = (uint8_t)((word & 0x0fff) >> 4);
-		sum += byte - adcRef;
+		if (byte > adcRef) {
+			sum += byte - adcRef;
+			++count;
+		}
+		// DEBUG Speed test
+		//else ++count;
 	}
 
 	__disable_irq();
@@ -964,18 +992,20 @@ void Report()
 	uint32_t _cmpCounter  = Swap(cmpCounter);
 	uint32_t _adcSum      = Swap(adcSum);
 	uint32_t _adcSumCount = Swap(adcSumCount);
-	
-	uint32_t data[3];
 
-	// _adcSum = (uint32_t)(ADC_PHY->DR & 0xfff);
-	
-	data[0] = _cmpCounter;
-	data[1] = _adcSum;
-	data[2] = _adcSumCount;
+	uint8_t data[1+4*3];
+	uint32_t *data32 = (uint32_t *)&(data[1]);
+	data[0] = ADC_PORT->IDR;   // Текущее значение АЦП
+	*data32 = _cmpCounter;     // Количество срабатываний компаратора
+	data32++;
+	*data32 = _adcSum;         // Сумма собранных с АЦП значений
+	data32++;
+	*data32 = _adcSumCount;    // Количество собранных с АЦП значений
 
-	// adcSumCount = 0;
-	
 	QueueData(CmdOutputReport, (uint8_t *)&data, sizeof(data));
+
+	// DEBUG Speed test
+	//adcSumCount = 0;
 }
 
 /**
@@ -1025,10 +1055,14 @@ int main()
 	EXTI_Configure();
 	USART_Configure();
 	Timers_Configure();
+	DAC_Configure();
 	
 	// Первым байтом ожидаем команду
 	rx.waitingCmd = 0;
-	
+
+	DAC_Cmd(DAC_Channel_1, ENABLE);
+	TriggerDAC();
+
 	// Устройство готово
 	ToggleLED1();
 
