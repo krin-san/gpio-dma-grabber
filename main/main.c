@@ -288,12 +288,6 @@ void GPIO_Configure()
 	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_Out_PP;
 	GPIO_Init(GPIOC, &GPIO_InitStructure);
 
-	// Пин кнопки USER (PA0)
-	GPIO_InitStructure.GPIO_Pin = GPIO_Pin_0;
-	GPIO_InitStructure.GPIO_Speed = GPIO_Speed_2MHz;
-	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_IPD;
-	GPIO_Init(GPIOA, &GPIO_InitStructure);
-
 	// Порт отладочных пинов DEBUG_PORT
 	GPIO_InitStructure.GPIO_Pin = DEBUG_PORT_PINS;
 	GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
