@@ -97,7 +97,8 @@ typedef enum {
 // Коды ошибок
 typedef enum {
 	ErrorCodeUnknown = '*',
-	ErrorCodeRxFail  = 'r'
+	ErrorCodeRxFail  = 'r',
+	ErrorCodeActive  = 'a'
 } ErrorCode;
 
 // Проверка кода входящей команды
@@ -565,9 +566,16 @@ void ProcessCmd(uint8_t cmd)
 			break;
 
 		case CmdInputSetRef:
-			// Нужно дождаться 8-битного (2xASCII) опорного значения
-			rx.waitingCmd = cmd;
-			rx.waitNBytes = 2;
+			if (monitoringActive == true) {
+				// Нельзя изменять опорное значение при запущенном мониторинге
+				ResetRx();
+				QueueError(ErrorCodeActive);
+			}
+			else {
+				// Нужно дождаться 8-битного (2xASCII) опорного значения
+				rx.waitingCmd = cmd;
+				rx.waitNBytes = 2;
+			}
 			break;
 
 		case CmdInputGetRef:
