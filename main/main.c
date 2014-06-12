@@ -300,7 +300,7 @@ void ADC_Configure()
 	ADC_InitStructure.ADC_NbrOfChannel = 1;
 	ADC_Init(ADC_PHY, &ADC_InitStructure);
 
-	ADC_RegularChannelConfig(ADC_PHY, ADC_Channel_0, 1, ADC_SampleTime_1Cycles5);
+	ADC_RegularChannelConfig(ADC_PHY, ADC_Channel_0, 1, ADC_SampleTime_7Cycles5);
 
 	ADC_Cmd(ADC_PHY, ENABLE);
 
@@ -1003,7 +1003,7 @@ void Report()
 
 	uint8_t data[1+4*3];
 	uint32_t *data32 = (uint32_t *)&(data[1]);
-	data[0] = ADC_PORT->IDR;   // Текущее значение АЦП
+	data[0] = (uint8_t)((ADC_PHY->DR & 0x0fff) >> 4);   // Текущее значение АЦП
 	*data32 = _cmpCounter;     // Количество срабатываний компаратора
 	data32++;
 	*data32 = _adcSum;         // Сумма собранных с АЦП значений
